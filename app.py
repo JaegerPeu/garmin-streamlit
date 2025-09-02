@@ -1,5 +1,5 @@
 import streamlit as st
-import garmin_to_gsheets
+import gsheet
 
 st.set_page_config(page_title="Garmin → Google Sheets", page_icon="⌚", layout="centered")
 
