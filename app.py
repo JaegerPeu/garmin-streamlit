@@ -470,20 +470,20 @@ else:
     st.info("Selecione pelo menos 2 métricas para ver correlações.")
 
 # ---------- TABELA FINAL ----------
-st.header("📑 DailyHUD (dados brutos)")
+#st.header("📑 DailyHUD (dados brutos)")
 
-df_display = daily_df.copy()
-if "Sono (h)" in df_display.columns:
-    df_display["Sono (h)"] = df_display["Sono (h)"].apply(format_hours)
-    if "Sono Deep (h)" in df_display.columns:
+#df_display = daily_df.copy()
+#if "Sono (h)" in df_display.columns:
+ #   df_display["Sono (h)"] = df_display["Sono (h)"].apply(format_hours)
+  #  if "Sono Deep (h)" in df_display.columns:
         df_display["Sono Deep (h)"] = df_display["Sono Deep (h)"].apply(format_hours)
-    if "Sono REM (h)" in df_display.columns:
+   # if "Sono REM (h)" in df_display.columns:
         df_display["Sono REM (h)"] = df_display["Sono REM (h)"].apply(format_hours)
-    if "Sono Light (h)" in df_display.columns:
-        df_display["Sono Light (h)"] = df_display["Sono Light (h)"].apply(format_hours)
+    #if "Sono Light (h)" in df_display.columns:
+     #   df_display["Sono Light (h)"] = df_display["Sono Light (h)"].apply(format_hours)
 
 # exibição do pace em mm:ss na tabela final
-if "PaceNum" in df_display.columns:
-    df_display["Pace (min/km)"] = df_display["PaceNum"].apply(format_pace)
+#if "PaceNum" in df_display.columns:
+#    df_display["Pace (min/km)"] = df_display["PaceNum"].apply(format_pace)
 
-st.dataframe(df_display)
+#st.dataframe(df_display)
