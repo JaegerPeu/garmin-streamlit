@@ -109,6 +109,9 @@ def format_pace(value):
         return f"{minutos}:{segundos:02d}"
     except Exception:
         return "-"
+def pace_series_to_hover(series: pd.Series):
+    """Transforma uma série numérica (minutos decimais) em lista mm:ss para hover."""
+    return [format_pace(v) if pd.notna(v) and v not in ("", 0) else None for v in series]
 
 def format_metric(value: Optional[float], fmt: str) -> str:
     """Formata métricas para a tabela de insights."""
@@ -206,43 +209,65 @@ if selected_metrics:
     color_idx = 0
 
     # Primeiro eixo Y
-    y1 = selected_metrics[0]
+y1 = selected_metrics[0]
+y1_series = series_for_metric(daily_df, y1)
+trace_kwargs = {}
+if y1 == "Pace (min/km)":
+    trace_kwargs["customdata"]    = pace_series_to_hover(y1_series)
+    trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y1 + ": %{customdata}<extra></extra>"
+
+fig.add_trace(
+    go.Scatter(
+        x=daily_df["Data"], y=y1_series,
+        mode="lines+markers", name=y1,
+        line=dict(color=colors[color_idx]),
+        **trace_kwargs
+    ),
+    secondary_y=False,
+)
+fig.update_yaxes(title_text=y1, secondary_y=False)
+color_idx += 1
+
+# Segundo eixo Y
+if len(selected_metrics) > 1:
+    y2 = selected_metrics[1]
+    y2_series = series_for_metric(daily_df, y2)
+    trace_kwargs = {}
+    if y2 == "Pace (min/km)":
+        trace_kwargs["customdata"]    = pace_series_to_hover(y2_series)
+        trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y2 + ": %{customdata}<extra></extra>"
+
     fig.add_trace(
         go.Scatter(
-            x=daily_df["Data"], y=series_for_metric(daily_df, y1),
-            mode="lines+markers", name=y1,
-            line=dict(color=colors[color_idx])
+            x=daily_df["Data"], y=y2_series,
+            mode="lines+markers", name=y2,
+            line=dict(color=colors[color_idx]),
+            **trace_kwargs
         ),
-        secondary_y=False,
+        secondary_y=True,
     )
-    fig.update_yaxes(title_text=y1, secondary_y=False)
+    fig.update_yaxes(title_text=y2, secondary_y=True)
     color_idx += 1
 
-    # Segundo eixo Y
-    if len(selected_metrics) > 1:
-        y2 = selected_metrics[1]
-        fig.add_trace(
-            go.Scatter(
-                x=daily_df["Data"], y=series_for_metric(daily_df, y2),
-                mode="lines+markers", name=y2,
-                line=dict(color=colors[color_idx])
-            ),
-            secondary_y=True,
-        )
-        fig.update_yaxes(title_text=y2, secondary_y=True)
-        color_idx += 1
+# Extras → mesmo eixo do segundo
+for m in selected_metrics[2:]:
+    m_series = series_for_metric(daily_df, m)
+    trace_kwargs = {}
+    if m == "Pace (min/km)":
+        trace_kwargs["customdata"]    = pace_series_to_hover(m_series)
+        trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + m + ": %{customdata}<extra></extra>"
 
-    # Extras → mesmo eixo do segundo
-    for m in selected_metrics[2:]:
-        fig.add_trace(
-            go.Scatter(
-                x=daily_df["Data"], y=series_for_metric(daily_df, m),
-                mode="lines+markers", name=m,
-                line=dict(color=colors[color_idx % len(colors)]),
-                yaxis="y2" if len(selected_metrics) > 1 else "y"
-            )
+    fig.add_trace(
+        go.Scatter(
+            x=daily_df["Data"], y=m_series,
+            mode="lines+markers", name=m,
+            line=dict(color=colors[color_idx % len(colors)]),
+            yaxis="y2" if len(selected_metrics) > 1 else "y",
+            **trace_kwargs
         )
-        color_idx += 1
+    )
+    color_idx += 1
+
 
     fig.update_layout(
         title="Comparativo de Métricas Selecionadas (DailyHUD)",
@@ -324,43 +349,66 @@ if not acts_df.empty:
             idx = 0
 
             # 1º eixo
-            y1 = selected_act_metrics[0]
-            fig_act.add_trace(
-                go.Scatter(
-                    x=df_filtered["Data"], y=series_for_act_daily(df_filtered, y1),
-                    mode="lines+markers", name=y1,
-                    line=dict(color=colors[idx])
-                ),
-                secondary_y=False,
-            )
-            fig_act.update_yaxes(title_text=y1, secondary_y=False)
-            idx += 1
+y1 = selected_act_metrics[0]
+y1_series = series_for_act_daily(df_filtered, y1)
+trace_kwargs = {}
+if y1 == "Pace (min/km)":
+    # aqui o numérico é PaceNumDaily
+    trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
+    trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y1 + ": %{customdata}<extra></extra>"
 
-            # 2º eixo
-            if len(selected_act_metrics) > 1:
-                y2 = selected_act_metrics[1]
-                fig_act.add_trace(
-                    go.Scatter(
-                        x=df_filtered["Data"], y=series_for_act_daily(df_filtered, y2),
-                        mode="lines+markers", name=y2,
-                        line=dict(color=colors[idx])
-                    ),
-                    secondary_y=True,
-                )
-                fig_act.update_yaxes(title_text=y2, secondary_y=True)
-                idx += 1
+fig_act.add_trace(
+    go.Scatter(
+        x=df_filtered["Data"], y=y1_series,
+        mode="lines+markers", name=y1,
+        line=dict(color=colors[idx]),
+        **trace_kwargs
+    ),
+    secondary_y=False,
+)
+fig_act.update_yaxes(title_text=y1, secondary_y=False)
+idx += 1
 
-            # extras -> mesmo eixo do 2º
-            for m in selected_act_metrics[2:]:
-                fig_act.add_trace(
-                    go.Scatter(
-                        x=df_filtered["Data"], y=series_for_act_daily(df_filtered, m),
-                        mode="lines+markers", name=m,
-                        line=dict(color=colors[idx % len(colors)]),
-                        yaxis="y2" if len(selected_act_metrics) > 1 else "y"
-                    )
-                )
-                idx += 1
+# 2º eixo
+if len(selected_act_metrics) > 1:
+    y2 = selected_act_metrics[1]
+    y2_series = series_for_act_daily(df_filtered, y2)
+    trace_kwargs = {}
+    if y2 == "Pace (min/km)":
+        trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
+        trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y2 + ": %{customdata}<extra></extra>"
+
+    fig_act.add_trace(
+        go.Scatter(
+            x=df_filtered["Data"], y=y2_series,
+            mode="lines+markers", name=y2,
+            line=dict(color=colors[idx]),
+            **trace_kwargs
+        ),
+        secondary_y=True,
+    )
+    fig_act.update_yaxes(title_text=y2, secondary_y=True)
+    idx += 1
+
+# extras -> mesmo eixo do 2º
+for m in selected_act_metrics[2:]:
+    m_series = series_for_act_daily(df_filtered, m)
+    trace_kwargs = {}
+    if m == "Pace (min/km)":
+        trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
+        trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + m + ": %{customdata}<extra></extra>"
+
+    fig_act.add_trace(
+        go.Scatter(
+            x=df_filtered["Data"], y=m_series,
+            mode="lines+markers", name=m,
+            line=dict(color=colors[idx % len(colors)]),
+            yaxis="y2" if len(selected_act_metrics) > 1 else "y",
+            **trace_kwargs
+        )
+    )
+    idx += 1
+
 
             fig_act.update_layout(
                 title=f"Evolução diária agregada — {selected_type}",
