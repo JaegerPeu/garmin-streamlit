@@ -68,7 +68,7 @@ st.write("Sincronize seus dados do Garmin com o Google Sheets e veja análises e
 if st.button("🔄 Atualizar dados do Garmin"):
     with st.spinner("Conectando ao Garmin e atualizando planilha..."):
         try:
-            garmin_to_gsheets.main()
+            gsheet.main()
             st.success("✅ Dados atualizados com sucesso!")
         except Exception as e:
             st.error("❌ Erro ao atualizar os dados")
