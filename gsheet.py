@@ -1,7 +1,7 @@
 # garmin_to_gsheets.py
 # ----------------------------------------------------
 # Coleta dados do Garmin e salva direto no Google Sheets
-# - Aba "DailyHUD": 1 linha por dia
+# - Aba "DailyHUD": 1 linha por dia (sono, score, body battery, stress, corrida, pace, passos, calorias)
 # - Aba "Activities": 1 linha por atividade (com Pace por atividade)
 # - Rodadas futuras mesclam com o conteúdo existente (sem duplicar)
 # ----------------------------------------------------
@@ -24,8 +24,8 @@ LAST_N_DAYS     = 3
 START_DATE = "2023-01-01"
 END_DATE   = "2025-08-31"
 
-# ID da planilha no Google Sheets
-GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"
+# ID da planilha no Google Sheets (já compartilhada com a service account)
+GSHEET_ID = "1rwcDJA1yZ2b...."  # substitua pelo ID da sua planilha
 
 # Credenciais do Google (do secrets do Streamlit)
 service_account_info = st.secrets["gcp_service_account"]
@@ -144,7 +144,7 @@ def normalize_activity(a: Dict[str, Any]) -> Dict[str, Any]:
         "Nome": a.get("activityName") or "",
     }
 
-def summarize_day(g: Garmin, day_iso: str) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
+def summarize_day(g: Garmin, day_iso: str, today: dt.date) -> Dict[str, Any]:
     acts = fetch_activities_by_day(g, day_iso)
 
     total_run_km = 0.0
@@ -158,17 +158,23 @@ def summarize_day(g: Garmin, day_iso: str) -> Tuple[Dict[str, Any], List[Dict[st
 
     sleep = fetch_sleep(g, day_iso)
     bb = fetch_body_battery(g, day_iso)
-    stress = fetch_stress_avg(g, day_iso)
+
+    # Pegar steps e calorias
     stats = fetch_steps_and_calories(g, day_iso)
 
-    # Corrigir calorias: usar do dia anterior (pois o dia atual ainda não fechou)
-    if d == today:
+    # Para o dia atual, usar os dados do dia anterior (fechados) para calorias e passos
+    if day_iso == today.isoformat():
         try:
-            yesterday = (d - dt.timedelta(days=1)).isoformat()
-            stats_yesterday = fetch_steps_and_calories(g, yesterday)
-            stats["calories"] = stats_yesterday["calories"]
+            yesterday = (today - dt.timedelta(days=1)).isoformat()
+            stats_yest = fetch_steps_and_calories(g, yesterday)
+            if stats_yest.get("calories"):
+                stats["calories"] = stats_yest.get("calories")
+            if stats_yest.get("steps"):
+                stats["steps"] = stats_yest.get("steps")
         except Exception:
             pass
+
+    stress = fetch_stress_avg(g, day_iso)
 
     row = {
         "Data": day_iso,
@@ -182,6 +188,7 @@ def summarize_day(g: Garmin, day_iso: str) -> Tuple[Dict[str, Any], List[Dict[st
         "Body Battery (end)": bb["bb_end"],
         "Body Battery (mín)": bb["bb_min"],
         "Body Battery (máx)": bb["bb_max"],
+        "Body Battery (média)": bb["bb_avg"],
         "Stress (média)": stress,
         "Corrida (km)": round(total_run_km, 2),
         "Pace (min/km)": pace_str(total_run_sec, total_run_km),
@@ -189,10 +196,9 @@ def summarize_day(g: Garmin, day_iso: str) -> Tuple[Dict[str, Any], List[Dict[st
         "Calorias (total dia)": stats["calories"],
         "Calorias (atividades)": total_cal_acts,
     }
-
     return row, acts, stats
 
-# ---------- Função para atualizar o Google Sheets ----------
+# ---------- Função para atualizar Google Sheets ----------
 def update_sheet(df, sheet_name, key_cols, sort_by):
     sheet = client.open_by_key(GSHEET_ID)
     try:
@@ -201,7 +207,7 @@ def update_sheet(df, sheet_name, key_cols, sort_by):
         ws = sheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
 
     old_df = get_as_dataframe(ws, evaluate_formulas=False, header=0)
-    old_df = old_df.dropna(how="all")
+    old_df = old_df.dropna(how= "all")
 
     if not old_df.empty:
         df_merged = pd.concat([old_df, df], ignore_index=True).drop_duplicates(subset=key_cols, keep="last")
@@ -229,7 +235,7 @@ def main():
 
     for d in daterange(start, end):
         day_iso = d.isoformat()
-        row, acts, _ = summarize_day(g, day_iso)
+        row, acts, _ = summarize_day(g, day_iso, today)
         daily_rows.append(row)
         for a in acts:
             activities_rows.append(normalize_activity(a))
