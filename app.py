@@ -258,88 +258,32 @@ acts_daily = pd.DataFrame()
 if not acts_df.empty:
     acts_df["Data"] = pd.to_datetime(acts_df["Data"], errors="coerce")
 
-    # --- helpers locais ---
-    import re
-    def clean_pace_str(x):
-        """Extrai 'mm:ss' (ou 'h:mm:ss') de strings tipo '4:36 min/km'. 
-           Se vier número decimal, retorna como string mesmo."""
-        if pd.isna(x):
-            return None
-        s = str(x).strip().replace(",", ".")
-        # tenta achar padrão tempo
-        m = re.findall(r"(\d{1,2}:\d{2}(?::\d{2})?)", s)
-        if m:
-            return m[0]
-        # tenta número decimal
-        try:
-            float(s)
-            return s
-        except Exception:
-            return None
-
-    def mmss_to_minutes_local(x) -> Optional[float]:
-        """Converte 'mm:ss' ou 'h:mm:ss' ou número decimal para minutos (float)."""
-        if x is None or x == "":
-            return None
-        try:
-            if isinstance(x, (int, float)):
-                return float(x)
-            s = str(x).strip().replace(",", ".")
-            parts = s.split(":")
-            if len(parts) == 2:
-                m = float(parts[0]); sec = float(parts[1])
-                return m + sec/60.0
-            if len(parts) == 3:
-                h = float(parts[0]); m = float(parts[1]); sec = float(parts[2])
-                return h*60.0 + m + sec/60.0
-            return float(s)
-        except Exception:
-            return None
-    # --- fim helpers ---
-
-    # pace por atividade -> minutos decimais com limpeza
-    if "Pace (min/km)" in acts_df.columns:
-        acts_df["PaceNumAct"] = acts_df["Pace (min/km)"].map(clean_pace_str).map(mmss_to_minutes_local)
-
-    # garantir numérico nas demais
-    for col in ["Distância (km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx", "PaceNumAct"]:
+    # garantir numérico nas colunas usadas no agregado
+    for col in ["Distância (km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx"]:
         if col in acts_df.columns:
             acts_df[col] = pd.to_numeric(acts_df[col], errors="coerce")
 
-    # AGRUPA por dia + tipo com pace ponderado pela distância (>0)
+    # AGRUPA por dia + tipo
     acts_work = acts_df.dropna(subset=["Data", "Tipo"]).copy()
     acts_work["DataDay"] = acts_work["Data"].dt.normalize()
 
     def _agg(g: pd.DataFrame) -> pd.Series:
-        dist = g["Distância (km)"].fillna(0)
-        pace = g["PaceNumAct"]
-        dur  = g["Duração (min)"]
-        cal  = g["Calorias"]
-        fc   = g["FC Média"]
-        vo2  = g["VO2 Máx"]
+        dist_sum = g["Distância (km)"].fillna(0).sum()
+        dur_sum  = g["Duração (min)"].fillna(0).sum()
+        cal_sum  = g["Calorias"].sum(skipna=True)
+        fc_mean  = g["FC Média"].mean(skipna=True)
+        vo2_mean = g["VO2 Máx"].mean(skipna=True)
 
-        mask = dist > 0
-        dist_pos = dist[mask]
-        pace_pos = pace[mask].dropna()
-
-        # pace ponderado só com registos válidos
-        if not dist_pos.empty and not pace_pos.empty:
-            # alinhar índices
-            common_idx = dist_pos.index.intersection(pace_pos.index)
-            if len(common_idx) > 0:
-                wpace = (pace.loc[common_idx] * dist.loc[common_idx]).sum() / dist.loc[common_idx].sum()
-            else:
-                wpace = None
-        else:
-            wpace = None
+        # pace diário correto = duração total (min) / distância total (km)
+        pace_num_daily = (dur_sum / dist_sum) if (dist_sum and dist_sum > 0) else None
 
         return pd.Series({
-            "Distância (km)": dist.sum(),
-            "Duração (min)": dur.sum(skipna=True),
-            "Calorias": cal.sum(skipna=True),
-            "FC Média": fc.mean(skipna=True),
-            "VO2 Máx": vo2.mean(skipna=True),
-            "PaceNumDaily": wpace
+            "Distância (km)": dist_sum,
+            "Duração (min)": dur_sum,
+            "Calorias": cal_sum,
+            "FC Média": fc_mean,
+            "VO2 Máx": vo2_mean,
+            "PaceNumDaily": pace_num_daily
         })
 
     acts_daily = (
@@ -369,6 +313,7 @@ if not acts_df.empty:
         )
 
         def series_for_act_daily(df: pd.DataFrame, colname: str) -> pd.Series:
+            # no gráfico, se for Pace (min/km), usamos a série numérica correta (minutos por km)
             if colname == "Pace (min/km)":
                 return pd.to_numeric(df["PaceNumDaily"], errors="coerce")
             return pd.to_numeric(df[colname], errors="coerce")
@@ -432,6 +377,7 @@ else:
     st.info("Nenhuma atividade encontrada ainda.")
 
 
+
 # ---------- INSIGHTS ----------
 st.header("🔍 Insights (WTD / MTD / QTD / YTD / Total)")
 
@@ -455,7 +401,7 @@ insights = {
 
     "Passos — Média":                {"col": "Passos",               "mode": "mean", "fmt": "int"},
     "Calorias (total dia) — Média":  {"col": "Calorias (total dia)", "mode": "mean", "fmt": "num"},
-    "Body Battery (média)":          {"col": "Body Battery (média)", "mode": "mean", "fmt": "num"},
+    "Body Battery (média)":          {"col": "Body Battery (máx)", "mode": "mean", "fmt": "num"},
     "Stress médio":                  {"col": "Stress (média)",       "mode": "mean", "fmt": "num"},
 
     # Breathwork: soma e média (considerando >0)
