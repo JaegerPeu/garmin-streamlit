@@ -1,9 +1,9 @@
 # app.py
 # =====================================================
 # Dashboard Streamlit para visualização dos dados Garmin
+# + HUD estilo RPG + Human 3.0 (One Thing & Metas)
 # Dados são carregados do Google Sheets (já atualizado
-# pelo script garmin_to_gsheets.py).
-# + Integração de HUD com Notion (code block)
+# pelo script gsheet.main()).
 # =====================================================
 
 import streamlit as st
@@ -15,8 +15,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime as dt
-from typing import Optional
-import requests  # <-- Notion API
+from typing import Optional, List
+import requests
+import math
 import gsheet
 
 # ================= CONFIGURAÇÃO ==================
@@ -26,15 +27,10 @@ service_account_info = st.secrets["gcp_service_account"]
 scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
 client = gspread.authorize(creds)
-
-# Notion (defina em .streamlit/secrets.toml)
-NOTION_TOKEN = st.secrets.get("notion_token", None)
-NOTION_BLOCK_ID = st.secrets.get("notion_block_id", "25f695cea74880c4a25dc91582810bdb")
-NOTION_COUNTER_DB_ID = st.secrets.get("notion_counter_db_id", None)
-NOTION_VERSION = "2022-06-28"
 # =================================================
 
-# ---------- Utils ----------
+
+# ---------- Utils básicos ----------
 def load_sheet(sheet_name: str) -> pd.DataFrame:
     """Carrega uma aba da planilha do Google Sheets em DataFrame."""
     try:
@@ -46,6 +42,87 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         st.error(f"❌ Erro ao carregar aba {sheet_name}: {e}")
         return pd.DataFrame()
 
+
+def ensure_worksheet(sheet_name: str, headers: List[str]) -> gspread.Worksheet:
+    """Garante que uma worksheet exista e tenha cabeçalho; cria se não existir."""
+    sh = client.open_by_key(GSHEET_ID)
+    try:
+        ws = sh.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=max(10, len(headers)))
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+        return ws
+
+    # se estiver vazia, escreve cabeçalho
+    existing = ws.get_all_values()
+    if not existing:
+        ws.append_row(headers, value_input_option="USER_ENTERED")
+    else:
+        # se já houver algo, mas o header for diferente, não forço troca para evitar bagunça
+        pass
+    return ws
+
+
+def upsert_humantrack(today: dt.date, payload: dict):
+    """Atualiza (se existir) ou insere uma linha do dia na aba 'HumanTrack'."""
+    headers = ["Data", "OneThing", "Mente", "Estudos", "Trabalho", "Corpo", "Lifestyle", "Notas"]
+    ws = ensure_worksheet("HumanTrack", headers=headers)
+
+    # lê dados existentes
+    records = ws.get_all_records()
+    df = pd.DataFrame(records)
+    if not df.empty and "Data" in df.columns:
+        df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.date
+
+    # se já existe linha do dia -> update
+    if not df.empty and (df["Data"] == today).any():
+        row_idx = df.index[df["Data"] == today][0] + 2  # +2 por causa do header (linha 1)
+        # mapeia cols
+        col_map = {h: i+1 for i, h in enumerate(headers)}
+        # atualiza cada campo
+        ws.update_cell(row_idx, col_map["OneThing"], payload.get("OneThing", ""))
+        ws.update_cell(row_idx, col_map["Mente"], "TRUE" if payload.get("Mente") else "FALSE")
+        ws.update_cell(row_idx, col_map["Estudos"], "TRUE" if payload.get("Estudos") else "FALSE")
+        ws.update_cell(row_idx, col_map["Trabalho"], "TRUE" if payload.get("Trabalho") else "FALSE")
+        ws.update_cell(row_idx, col_map["Corpo"], "TRUE" if payload.get("Corpo") else "FALSE")
+        ws.update_cell(row_idx, col_map["Lifestyle"], "TRUE" if payload.get("Lifestyle") else "FALSE")
+        ws.update_cell(row_idx, col_map["Notas"], payload.get("Notas", ""))
+    else:
+        # append linha nova
+        row = [
+            today.strftime("%Y-%m-%d"),
+            payload.get("OneThing", ""),
+            "TRUE" if payload.get("Mente") else "FALSE",
+            "TRUE" if payload.get("Estudos") else "FALSE",
+            "TRUE" if payload.get("Trabalho") else "FALSE",
+            "TRUE" if payload.get("Corpo") else "FALSE",
+            "TRUE" if payload.get("Lifestyle") else "FALSE",
+            payload.get("Notas", ""),
+        ]
+        ws.append_row(row, value_input_option="USER_ENTERED")
+
+
+def get_today_turtle_objective() -> str:
+    """Lê a aba 'Turtle' e retorna o 'Objetivo' do dia atual (colunas: Data, Objetivo)."""
+    try:
+        turtle = load_sheet("Turtle")
+        if turtle.empty:
+            return "-"
+        # normaliza cols
+        cols = {c.strip(): c for c in turtle.columns}
+        if "Data" not in cols or "Objetivo" not in cols:
+            return "-"
+        turtle["Data"] = pd.to_datetime(turtle[cols["Data"]], errors="coerce").dt.date
+        today = dt.date.today()
+        row = turtle[turtle["Data"] == today]
+        if row.empty:
+            return "-"
+        objetivo = str(row.iloc[-1][cols["Objetivo"]]).strip()
+        return objetivo if objetivo not in ("", "nan", "NaN", None) else "-"
+    except Exception:
+        return "-"
+
+
 def calc_period(
     df: pd.DataFrame,
     col: str,
@@ -55,10 +132,7 @@ def calc_period(
     mode: str = "mean",
     filter_col: Optional[str] = None,
 ) -> Optional[float]:
-    """Calcula métrica (média ou soma) em um período (WTD, MTD, QTD, YTD, TOTAL).
-       - only_positive: ignora valores <= 0
-       - filter_col: se informado, só calcula quando filter_col > 0 (ex: pace apenas em dias com corrida)
-    """
+    """Calcula métrica (média ou soma) em um período (WTD, MTD, QTD, YTD, TOTAL)."""
     if col not in df.columns:
         return None
 
@@ -77,10 +151,7 @@ def calc_period(
     elif freq == "YTD":
         start = dt.date(today.year, 1, 1)
     else:  # TOTAL
-        if temp[date_col].notna().any():
-            start = temp[date_col].min().date()
-        else:
-            return None
+        start = temp[date_col].min().date()
 
     mask = temp[date_col].dt.date >= start
     subset = temp.loc[mask]
@@ -99,8 +170,8 @@ def calc_period(
 
     return float(vals.sum() if mode == "sum" else vals.mean())
 
+
 def format_hours(value):
-    """Converte horas decimais em hh:mm para exibição."""
     if pd.isna(value) or value == "":
         return "-"
     try:
@@ -110,8 +181,8 @@ def format_hours(value):
     except Exception:
         return "-"
 
+
 def format_pace(value):
-    """Converte pace decimal em mm:ss para exibição."""
     if pd.isna(value) or value == "" or float(value) == 0:
         return "-"
     try:
@@ -121,12 +192,12 @@ def format_pace(value):
     except Exception:
         return "-"
 
+
 def pace_series_to_hover(series: pd.Series):
-    """Transforma uma série numérica (minutos decimais) em lista mm:ss para hover."""
     return [format_pace(v) if pd.notna(v) and v not in ("", 0) else None for v in series]
 
+
 def format_metric(value: Optional[float], fmt: str) -> str:
-    """Formata métricas para a tabela de insights."""
     if value is None:
         return "-"
     if fmt == "time":
@@ -137,8 +208,8 @@ def format_metric(value: Optional[float], fmt: str) -> str:
         return f"{value:,.0f}"
     return f"{value:.2f}"
 
+
 def mmss_to_minutes(x) -> Optional[float]:
-    """Converte 'mm:ss' (ou 'h:mm:ss') para minutos decimais. Aceita número já decimal."""
     if pd.isna(x) or x == "":
         return None
     try:
@@ -156,254 +227,14 @@ def mmss_to_minutes(x) -> Optional[float]:
     except Exception:
         return None
 
-# ---------- Funções Notion ----------
-def notion_headers():
-    if not NOTION_TOKEN:
-        return None
-    return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json",
-    }
-
-def update_notion_block(block_id: str, content: str):
-    """Atualiza o conteúdo de um bloco de código no Notion (language=markdown)."""
-    hdrs = notion_headers()
-    if not hdrs:
-        st.error("❌ NOTION_TOKEN não configurado em st.secrets['notion_token'].")
-        return
-    url = f"https://api.notion.com/v1/blocks/{block_id}"
-    payload = {
-        "object": "block",
-        "type": "code",
-        "code": {
-            "rich_text": [{"type": "text", "text": {"content": content}}],
-            "language": "markdown",
-        },
-    }
-    resp = requests.patch(url, headers=hdrs, json=payload)
-    if resp.status_code == 200:
-        st.success("✅ HUD atualizado no Notion!")
-    else:
-        st.error(f"❌ Erro ao atualizar bloco Notion ({resp.status_code})")
-        try:
-            st.write(resp.json())
-        except Exception:
-            st.write(resp.text)
-
-def notion_query_counter_streak() -> Optional[str]:
-    """
-    Lê a database 'Counter' no Notion (se NOTION_COUNTER_DB_ID estiver em secrets)
-    e tenta extrair um valor de streak.
-    Fallback: retorna '-' se não conseguir ler.
-    """
-    if not NOTION_COUNTER_DB_ID:
-        return "-"
-    hdrs = notion_headers()
-    if not hdrs:
-        return "-"
-    url = f"https://api.notion.com/v1/databases/{NOTION_COUNTER_DB_ID}/query"
-    resp = requests.post(url, headers=hdrs, json={})
-    if resp.status_code != 200:
-        return "-"
-    data = resp.json()
-    results = data.get("results", [])
-    if not results:
-        return "-"
-    # Heurística: tenta achar uma propriedade numérica chamada Streak/Count
-    for prop_name in ["Streak", "streak", "Count", "count", "Valor", "value"]:
-        for page in results:
-            props = page.get("properties", {})
-            prop = props.get(prop_name)
-            if not prop:
-                continue
-            if prop.get("type") == "number":
-                val = prop.get("number")
-                if val is not None:
-                    return str(int(val)) if float(val).is_integer() else str(val)
-            if prop.get("type") == "rich_text":
-                texts = prop.get("rich_text", [])
-                if texts:
-                    return texts[0].get("plain_text", "-")
-    # fallback genérico: pega o primeiro número encontrado
-    for page in results:
-        props = page.get("properties", {})
-        for p in props.values():
-            if p.get("type") == "number" and p.get("number") is not None:
-                val = p.get("number")
-                return str(int(val)) if float(val).is_integer() else str(val)
-    return "-"
-
-# ---------- HUD ----------
-def gerar_hud_markdown(daily_df: pd.DataFrame, acts_df: pd.DataFrame, turtle_df: pd.DataFrame) -> str:
-    """Gera HUD em estilo RPG a partir dos dados (DailyHUD, Activities e Turtle)."""
-    today = dt.date.today()
-
-    # --- Daily base (último registro válido)
-    ddf = daily_df.copy()
-    ddf["Data"] = pd.to_datetime(ddf["Data"], errors="coerce")
-    ddf = ddf.sort_values("Data")
-    ultimo = ddf.iloc[-1] if not ddf.empty else pd.Series(dtype="object")
-
-    def gv(s, col, default="-"):
-        try:
-            v = s.get(col, default)
-            if pd.isna(v): return default
-            return v
-        except Exception:
-            return default
-
-    sono_horas = gv(ultimo, "Sono (h)", "-")
-    sono_score = gv(ultimo, "Sono (score)", "-")
-    bb_max     = gv(ultimo, "Body Battery (máx)", "-")
-    calorias_d = gv(ultimo, "Calorias (total dia)", "-")
-    passos_d   = gv(ultimo, "Passos", "-")
-    breath_d   = gv(ultimo, "Breathwork (min)", "-")
-
-    # --- Breathwork últimos 7 dias
-    last7_mask = ddf["Data"].dt.date >= (today - dt.timedelta(days=6))
-    breath_7d_sum = ddf.loc[last7_mask, "Breathwork (min)"].dropna().sum() if "Breathwork (min)" in ddf.columns else 0
-    breath_7d_avg = ddf.loc[last7_mask, "Breathwork (min)"].dropna().mean() if "Breathwork (min)" in ddf.columns else 0
-
-    # --- Atividade (running) últimos 7d
-    runs_7d_sessions = 0
-    runs_7d_km = 0.0
-    runs_7d_pace = "-"
-    runs_7d_km_per_session = "-"
-
-    if not acts_df.empty:
-        adf = acts_df.copy()
-        adf["Data"] = pd.to_datetime(adf["Data"], errors="coerce")
-        adf = adf.dropna(subset=["Data"])
-        adf["DataDay"] = adf["Data"].dt.normalize()
-        # últimos 7 dias
-        adf7 = adf[adf["DataDay"].dt.date >= (today - dt.timedelta(days=6))]
-        adf7_run = adf7[adf7["Tipo"] == "running"]
-        if not adf7_run.empty:
-            runs_7d_sessions = len(adf7_run)
-            runs_7d_km = pd.to_numeric(adf7_run["Distância (km)"], errors="coerce").fillna(0).sum()
-            dur_sum = pd.to_numeric(adf7_run["Duração (min)"], errors="coerce").fillna(0).sum()
-            if runs_7d_km > 0:
-                runs_7d_pace = format_pace(dur_sum / runs_7d_km)
-                runs_7d_km_per_session = f"{(runs_7d_km / runs_7d_sessions):.2f}"
-
-    passos_7d_med = "-"
-    if "Passos" in ddf.columns:
-        passos_7d_med = ddf.loc[last7_mask, "Passos"].dropna().mean()
-        passos_7d_med = f"{passos_7d_med:,.0f}" if pd.notna(passos_7d_med) else "-"
-
-    # --- Períodos WTD/MTD/QTD/YTD (running): sessões, km, pace
-    def period_stats(acts: pd.DataFrame, start_date: dt.date):
-        zz = acts[(acts["Tipo"] == "running") & (acts["Data"].dt.date >= start_date)]
-        if zz.empty:
-            return {"sess": 0, "km": "-", "pace": "-"}
-        sess = len(zz)
-        km = pd.to_numeric(zz["Distância (km)"], errors="coerce").fillna(0).sum()
-        dur = pd.to_numeric(zz["Duração (min)"], errors="coerce").fillna(0).sum()
-        pace = format_pace(dur / km) if km > 0 else "-"
-        return {"sess": sess, "km": f"{km:.2f}", "pace": pace}
-
-    wtd_start = today - dt.timedelta(days=today.weekday())
-    mtd_start = today.replace(day=1)
-    q = (today.month - 1) // 3 + 1
-    qtd_start = dt.date(today.year, 3 * (q - 1) + 1, 1)
-    ytd_start = dt.date(today.year, 1, 1)
-
-    periods_tbl = []
-    if not acts_df.empty:
-        acts_tmp = acts_df.copy()
-        acts_tmp["Data"] = pd.to_datetime(acts_tmp["Data"], errors="coerce")
-        acts_tmp = acts_tmp.dropna(subset=["Data"])
-        for label, sdate in [("WTD", wtd_start), ("MTD", mtd_start), ("QTD", qtd_start), ("YTD", ytd_start)]:
-            p = period_stats(acts_tmp, sdate)
-            periods_tbl.append((label, p["sess"], p["km"], p["pace"]))
-    else:
-        periods_tbl = [("WTD", 0, "-", "-"), ("MTD", 0, "-", "-"), ("QTD", 0, "-", "-"), ("YTD", 0, "-", "-")]
-
-    # --- Objetivo do dia (Turtle / coluna 'Objetivo')
-    objetivo = "-"
-    if not turtle_df.empty and "Data" in turtle_df.columns:
-        tdf = turtle_df.copy()
-        tdf["Data"] = pd.to_datetime(tdf["Data"], errors="coerce")
-        row = tdf[tdf["Data"].dt.date == today]
-        if not row.empty:
-            if "Objetivo" in row.columns:
-                objetivo = row.iloc[0]["Objetivo"]
-
-    # --- Streak (Notion Counter)
-    streak_val = notion_query_counter_streak()  # "-" se não configurado
-
-    # barras de energia 10/10 baseada no Body Battery max
-    try:
-        bb_int = int(float(bb_max))
-        ticks = max(0, min(10, round(bb_int / 10)))
-        energia_bar = "[" + "#" * ticks + "." * (10 - ticks) + f"] {bb_int}%"
-    except Exception:
-        energia_bar = f"[####......] {bb_max}%"
-
-    # HUD
-    hud = f"""
-╔══════════════════════════════════════════════════════════════════╗
-║ HUD — {today.strftime("%A, %d/%m/%Y")}                                  ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Player: Pedro Duarte                                             ║
-║ Energia: {energia_bar:<56}║
-║ Sono: {format_hours(sono_horas) if isinstance(sono_horas,(int,float)) else sono_horas} | Qualidade: {sono_score}                    ║
-╚══════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════╗
-║                              Mente                               ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Meditação hoje: {breath_d if breath_d!='-' else 0} min                                  ║
-║ Últimos 7d:     {int(breath_7d_sum)} min (média {int(round(breath_7d_avg))} min/dia)    ║
-╚══════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════╗
-║                      Atividade Física (7d)                       ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Sessões:        {runs_7d_sessions:<3}                                           ║
-║ Distância:      {runs_7d_km:.2f} km                                        ║
-║ Pace médio:     {runs_7d_pace:<9}                                     ║
-║ Km/treino:      {runs_7d_km_per_session:<6} km                                  ║
-║ Passos médios:  {passos_7d_med:<10}                                  ║
-╚══════════════════════════════════════════════════════════════════╝
-
-| Período  | Sessões |     Km |    Pace |
-|---------------------------------------------|
-| {periods_tbl[0][0]:<7}  | {periods_tbl[0][1]:>7} | {periods_tbl[0][2]:>6} | {periods_tbl[0][3]:>7} |
-| {periods_tbl[1][0]:<7}  | {periods_tbl[1][1]:>7} | {periods_tbl[1][2]:>6} | {periods_tbl[1][3]:>7} |
-| {periods_tbl[2][0]:<7}  | {periods_tbl[2][1]:>7} | {periods_tbl[2][2]:>6} | {periods_tbl[2][3]:>7} |
-| {periods_tbl[3][0]:<7}  | {periods_tbl[3][1]:>7} | {periods_tbl[3][2]:>6} | {periods_tbl[3][3]:>7} |
-
-╔══════════════════════════════════════════════════════════════════╗
-║                           Corpo (hoje)                           ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Body Battery:   {bb_max}%                                         ║
-║ Calorias d-1:   {calorias_d}                                      ║
-║ Passos d-1:     {passos_d}                                        ║
-╚══════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════╗
-║                         Trabalho / Trade                         ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Objetivo de hoje:   {objetivo}                                    ║
-╚══════════════════════════════════════════════════════════════════╝
-
-╔══════════════════════════════════════════════════════════════════╗
-║                            Lifestyle                             ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Streak:         {streak_val}                                      ║
-╚══════════════════════════════════════════════════════════════════╝
-"""
-    return hud
 
 # ---------- APP ----------
-st.set_page_config(page_title="📊 Dashboard Garmin", layout="wide")
+st.set_page_config(page_title="📊 Dashboard Garmin / Human 3.0", layout="wide")
 
-st.title("🏃‍♂️ Dashboard de Atividades Garmin")
-st.write("Sincronize seus dados do Garmin com o Google Sheets e veja análises em tempo real.")
+st.title("🏃‍♂️ Dashboard de Atividades Garmin + 🎮 HUD Human 3.0")
+st.write("Sincronize seus dados do Garmin com o Google Sheets e veja análises em tempo real. O HUD de RPG mostra seus stats de hoje, e o Human 3.0 registra seu One Thing e metas diárias.")
 
-# Botão para atualizar planilha
+# Botão para atualizar planilha (coleta Garmin -> Google Sheets)
 if st.button("🔄 Atualizar dados do Garmin"):
     with st.spinner("Conectando ao Garmin e atualizando planilha..."):
         try:
@@ -417,7 +248,6 @@ if st.button("🔄 Atualizar dados do Garmin"):
 # Carrega dados
 daily_df = load_sheet("DailyHUD")
 acts_df  = load_sheet("Activities")
-turtle_df = load_sheet("Turtle")  # <- para Objetivo do dia
 
 if daily_df.empty:
     st.warning("Nenhum dado encontrado na aba `DailyHUD`. Clique em **Atualizar dados** acima.")
@@ -429,7 +259,7 @@ daily_df["Data"] = pd.to_datetime(daily_df["Data"], errors="coerce")
 numeric_cols = [
     "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)",
     "Sono (score)", "Body Battery (start)", "Body Battery (end)",
-    "Body Battery (mín)", "Body Battery (máx)", "Body Battery (máx)",
+    "Body Battery (mín)", "Body Battery (máx)",
     "Stress (média)", "Passos", "Calorias (total dia)",
     "Corrida (km)", "Pace (min/km)", "Breathwork (min)"
 ]
@@ -441,7 +271,232 @@ for c in numeric_cols:
 if "Pace (min/km)" in daily_df.columns:
     daily_df["PaceNum"] = daily_df["Pace (min/km)"].apply(mmss_to_minutes)
 
-# ---------- GRÁFICO MULTIMÉTRICAS (DailyHUD) ----------
+# ---------- ATIVIDADES (agregado por dia / tipo) ----------
+acts_daily = pd.DataFrame()
+if not acts_df.empty:
+    acts_df["Data"] = pd.to_datetime(acts_df["Data"], errors="coerce")
+    for col in ["Distância (km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx"]:
+        if col in acts_df.columns:
+            acts_df[col] = pd.to_numeric(acts_df[col], errors="coerce")
+
+    acts_work = acts_df.dropna(subset=["Data", "Tipo"]).copy()
+    acts_work["DataDay"] = acts_work["Data"].dt.normalize()
+
+    def _agg(g: pd.DataFrame) -> pd.Series:
+        dist_sum = g["Distância (km)"].fillna(0).sum()
+        dur_sum  = g["Duração (min)"].fillna(0).sum()
+        cal_sum  = g["Calorias"].sum(skipna=True)
+        fc_mean  = g["FC Média"].mean(skipna=True)
+        vo2_mean = g["VO2 Máx"].mean(skipna=True)
+        pace_num_daily = (dur_sum / dist_sum) if (dist_sum and dist_sum > 0) else None
+        return pd.Series({
+            "Distância (km)": dist_sum,
+            "Duração (min)": dur_sum,
+            "Calorias": cal_sum,
+            "FC Média": fc_mean,
+            "VO2 Máx": vo2_mean,
+            "PaceNumDaily": pace_num_daily
+        })
+
+    acts_daily = (
+        acts_work
+        .groupby(["DataDay", "Tipo"], as_index=False)
+        .apply(_agg)
+        .reset_index(drop=True)
+        .rename(columns={"DataDay": "Data"})
+    )
+    acts_daily["Pace (min/km)"] = acts_daily["PaceNumDaily"].apply(format_pace)
+
+
+# =========================================================
+# ================  🎮 HUD — Status de Hoje  ==============
+# =========================================================
+st.header("🎮 HUD — Status de Hoje")
+
+today = dt.date.today()
+today_str = today.strftime("%A, %d/%m/%Y")
+
+# Último dia registrado no DailyHUD
+last_day_row = daily_df.sort_values("Data").dropna(subset=["Data"]).iloc[-1]  # mais recente
+
+# Objetivo do dia (Turtle)
+turtle_obj = get_today_turtle_objective()
+
+# Tipo padrão do HUD (corrida)
+hud_type = "running"
+if not acts_daily.empty:
+    # se existir o tipo running, usa; senão pega o primeiro disponível
+    types_avail = acts_daily["Tipo"].dropna().unique().tolist()
+    if hud_type not in types_avail and types_avail:
+        hud_type = types_avail[0]
+else:
+    types_avail = []
+
+# 7 dias atividade (por tipo)
+def last_n_days_mask(df, n=7):
+    start = (pd.Timestamp(today) - pd.Timedelta(days=n-1)).normalize()
+    return df["Data"] >= start
+
+sessions_7d = 0
+km_7d = 0.0
+pace_7d = "-"
+if not acts_daily.empty and hud_type in types_avail:
+    df7 = acts_daily[(acts_daily["Tipo"] == hud_type) & last_n_days_mask(acts_daily, 7)]
+    sessions_7d = len(df7)  # dias com atividade
+    km_7d = df7["Distância (km)"].sum()
+    pace_7d = format_pace(df7["PaceNumDaily"].mean()) if not df7["PaceNumDaily"].dropna().empty else "-"
+
+passos_7d = "-"
+if "Passos" in daily_df.columns:
+    d7 = daily_df[last_n_days_mask(daily_df, 7)]
+    passos_7d = f"{d7['Passos'].mean():,.0f}" if not d7.empty else "-"
+
+# Energia e sono do dia mais recente
+energia = last_day_row.get("Body Battery (máx)", None)
+if pd.isna(energia):
+    energia = last_day_row.get("Body Battery (end)", None)
+energia_txt = f"{int(energia)}%" if energia is not None and not pd.isna(energia) else "-"
+
+sono_h = last_day_row.get("Sono (h)", None)
+sono_txt = f"{float(sono_h):.1f}h" if sono_h is not None and not pd.isna(sono_h) else "-"
+
+sono_score = last_day_row.get("Sono (score)", None)
+score_txt = f"{int(sono_score)}" if sono_score is not None and not pd.isna(sono_score) else "-"
+
+breath_today = last_day_row.get("Breathwork (min)", None)
+breath_today_txt = f"{int(breath_today)}" if breath_today is not None and not pd.isna(breath_today) else "0"
+
+breath_7d = 0
+if "Breathwork (min)" in daily_df.columns:
+    d7 = daily_df[last_n_days_mask(daily_df, 7)]
+    breath_7d = int(round(d7["Breathwork (min)"].fillna(0).mean())) if not d7.empty else 0
+
+cal_d1 = last_day_row.get("Calorias (total dia)", None)
+cal_txt = f"{int(cal_d1):d}" if cal_d1 is not None and not pd.isna(cal_d1) else "-"
+
+steps_d1 = last_day_row.get("Passos", None)
+steps_txt = f"{int(steps_d1):d}" if steps_d1 is not None and not pd.isna(steps_d1) else "-"
+
+# Previsão do tempo (opcional)
+weather_line = "—"
+owm_key = st.secrets.get("openweathermap_api_key")
+default_city = st.secrets.get("default_city", "Sao Paulo,BR")
+if owm_key:
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={default_city}&appid={owm_key}&units=metric&lang=pt_br"
+        r = requests.get(url, timeout=8)
+        if r.ok:
+            data = r.json()
+            desc = data["weather"][0]["description"].capitalize()
+            temp = round(data["main"]["temp"])
+            weather_line = f"{desc}, {temp}°C"
+    except Exception:
+        weather_line = "—"
+
+# Notícias (opcional)
+news_line = []
+news_key = st.secrets.get("newsapi_key")
+news_topic = st.secrets.get("news_topic", "saúde OR corrida OR sono")
+if news_key:
+    try:
+        url = f"https://newsapi.org/v2/everything?q={news_topic}&language=pt&sortBy=publishedAt&pageSize=3&apiKey={news_key}"
+        r = requests.get(url, timeout=8)
+        if r.ok:
+            js = r.json()
+            for art in js.get("articles", []):
+                title = art.get("title", "").strip()
+                if title:
+                    news_line.append(f"- {title}")
+    except Exception:
+        news_line = []
+
+# Render: HUD ASCII
+hud_card = f"""
+╔══════════════════════════════════════════════════════════════════╗
+║ HUD — {today_str:<54}║
+╠══════════════════════════════════════════════════════════════════╣
+║ Player: Pedro Duarte ║
+║ Energia: {('[##########]' if energia and energia>=90 else '[########..]' if energia and energia>=70 else '[######....]' if energia and energia>=50 else '[###.......]' if energia is not None else '[..........]')} {energia_txt:<5} ║
+║ Sono: {sono_txt:<6} | Qualidade: {score_txt:<3} ║
+║ Clima: {weather_line:<52}║
+╚══════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════╗
+║ Mente ║
+╠══════════════════════════════════════════════════════════════════╣
+║ Meditação hoje: {breath_today_txt:>3} min | Média 7d: {breath_7d:>3} min ║
+╚══════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════╗
+║ Atividade Física (últimos 7 dias) ║
+╠══════════════════════════════════════════════════════════════════╣
+║ Tipo: {hud_type:<57}║
+║ Sessões: {sessions_7d:>3} | Distância: {km_7d:>6.2f} km | Pace médio: {pace_7d:<8} ║
+║ Passos médios: {passos_7d:<44}║
+╚══════════════════════════════════════════════════════════════════╝
+
+╔══════════════════════════════════════════════════════════════════╗
+║ Trabalho / Trade ║
+╠══════════════════════════════════════════════════════════════════╣
+║ Objetivo de hoje: {turtle_obj[:56]:<56}║
+╚══════════════════════════════════════════════════════════════════╝
+"""
+st.markdown(hud_card)
+
+if news_line:
+    with st.expander("🗞️ Notícias do dia (títulos)"):
+        st.write("\n".join(news_line))
+
+
+# =========================================================
+# ==========  🧠 Human 3.0 — One Thing & Metas  ===========
+# =========================================================
+st.header("🧠 Human 3.0 — One Thing & Metas (tracking diário)")
+
+colA, colB = st.columns([2,1])
+with colA:
+    one_thing = st.text_input("🎯 One Thing do dia", value="", placeholder="Qual é a uma coisa que torna seu dia ganho?")
+    notas = st.text_area("📝 Notas rápidas (opcional)", value="", height=80)
+with colB:
+    st.write("Checklist de hoje")
+    m_done = st.checkbox("Mente")
+    e_done = st.checkbox("Estudos")
+    t_done = st.checkbox("Trabalho")
+    c_done = st.checkbox("Corpo")
+    l_done = st.checkbox("Lifestyle")
+
+if st.button("💾 Salvar metas do dia (HumanTrack)"):
+    payload = {
+        "OneThing": one_thing.strip(),
+        "Mente": m_done,
+        "Estudos": e_done,
+        "Trabalho": t_done,
+        "Corpo": c_done,
+        "Lifestyle": l_done,
+        "Notas": notas.strip(),
+    }
+    try:
+        upsert_humantrack(today, payload)
+        st.success("✅ Registro salvo/atualizado em `HumanTrack`!")
+    except Exception as e:
+        st.error("❌ Não consegui salvar no `HumanTrack`.")
+        st.exception(e)
+
+# Mostra últimos 7 registros
+try:
+    ht_df = load_sheet("HumanTrack")
+    if not ht_df.empty:
+        ht_df["Data"] = pd.to_datetime(ht_df["Data"], errors="coerce")
+        ht_df = ht_df.sort_values("Data", ascending=False).head(7)
+        st.subheader("📅 Últimos registros (HumanTrack)")
+        st.dataframe(ht_df)
+except Exception:
+    pass
+
+
+# =========================================================
+# ==========  GRÁFICO MULTIMÉTRICAS (DailyHUD)  ===========
+# =========================================================
 st.header("📊 Evolução das Métricas (Daily)")
 
 metrics = numeric_cols
@@ -452,7 +507,6 @@ selected_metrics = st.multiselect(
 )
 
 def series_for_metric(df: pd.DataFrame, colname: str) -> pd.Series:
-    """Se a métrica for Pace (min/km), usar PaceNum (decimal). Senão, usa a própria coluna."""
     if colname == "Pace (min/km)" and "PaceNum" in df.columns:
         return df["PaceNum"]
     return df[colname]
@@ -503,7 +557,7 @@ if selected_metrics:
         fig.update_yaxes(title_text=y2, secondary_y=True)
         color_idx += 1
 
-    # Extras → mesmo eixo do segundo
+    # Extras
     for m in selected_metrics[2:]:
         m_series = series_for_metric(daily_df, m)
         trace_kwargs = {}
@@ -529,159 +583,116 @@ if selected_metrics:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-# ---------- ATIVIDADES (Activities) ----------
+
+# =========================================================
+# ============  ATIVIDADES (agregado por dia)  ============
+# =========================================================
 st.header("🏃‍♀️ Atividades (agregado por dia)")
 
-acts_daily = pd.DataFrame()
-if not acts_df.empty:
-    acts_df["Data"] = pd.to_datetime(acts_df["Data"], errors="coerce")
+if not acts_daily.empty:
+    activity_types = acts_daily["Tipo"].dropna().unique().tolist()
+    selected_type_plot = st.selectbox("Escolha o tipo de atividade:", activity_types, index=0)
+    df_filtered = acts_daily[acts_daily["Tipo"] == selected_type_plot].copy()
 
-    # garantir numérico nas colunas usadas no agregado
-    for col in ["Distância (km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx"]:
-        if col in acts_df.columns:
-            acts_df[col] = pd.to_numeric(acts_df[col], errors="coerce")
-
-    # AGRUPA por dia + tipo
-    acts_work = acts_df.dropna(subset=["Data", "Tipo"]).copy()
-    acts_work["DataDay"] = acts_work["Data"].dt.normalize()
-
-    def _agg(g: pd.DataFrame) -> pd.Series:
-        dist_sum = g["Distância (km)"].fillna(0).sum()
-        dur_sum  = g["Duração (min)"].fillna(0).sum()
-        cal_sum  = g["Calorias"].sum(skipna=True) if "Calorias" in g.columns else None
-        fc_mean  = g["FC Média"].mean(skipna=True) if "FC Média" in g.columns else None
-        vo2_mean = g["VO2 Máx"].mean(skipna=True) if "VO2 Máx" in g.columns else None
-
-        # pace diário correto = duração total (min) / distância total (km)
-        pace_num_daily = (dur_sum / dist_sum) if (dist_sum and dist_sum > 0) else None
-
-        return pd.Series({
-            "Distância (km)": dist_sum,
-            "Duração (min)": dur_sum,
-            "Calorias": cal_sum,
-            "FC Média": fc_mean,
-            "VO2 Máx": vo2_mean,
-            "PaceNumDaily": pace_num_daily
-        })
-
-    acts_daily = (
-        acts_work
-        .groupby(["DataDay", "Tipo"], as_index=False)
-        .apply(_agg)
-        .reset_index(drop=True)
-        .rename(columns={"DataDay": "Data"})
+    act_metrics = ["Distância (km)", "Pace (min/km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx"]
+    selected_act_metrics = st.multiselect(
+        "Escolha métricas da atividade:",
+        act_metrics,
+        default=["Distância (km)", "Pace (min/km)"]
     )
 
-    # pace formatado só para a tabela (o gráfico usa PaceNumDaily)
-    acts_daily["Pace (min/km)"] = acts_daily["PaceNumDaily"].apply(format_pace)
+    def series_for_act_daily(df: pd.DataFrame, colname: str) -> pd.Series:
+        if colname == "Pace (min/km)":
+            return pd.to_numeric(df["PaceNumDaily"], errors="coerce")
+        return pd.to_numeric(df[colname], errors="coerce")
 
-    # Filtro de tipo
-    activity_types = acts_daily["Tipo"].dropna().unique().tolist()
-    if not activity_types:
-        st.info("Não há atividades agregadas para exibir.")
-    else:
-        selected_type = st.selectbox("Escolha o tipo de atividade:", activity_types, index=0)
-        df_filtered = acts_daily[acts_daily["Tipo"] == selected_type].copy()
+    if selected_act_metrics and not df_filtered.empty:
+        fig_act = make_subplots(specs=[[{"secondary_y": True}]])
+        colors = px.colors.qualitative.Plotly
+        idx = 0
 
-        act_metrics = ["Distância (km)", "Pace (min/km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx"]
-        selected_act_metrics = st.multiselect(
-            "Escolha métricas da atividade:",
-            act_metrics,
-            default=["Distância (km)", "Pace (min/km)"]
+        # 1º eixo
+        y1 = selected_act_metrics[0]
+        y1_series = series_for_act_daily(df_filtered, y1)
+        trace_kwargs = {}
+        if y1 == "Pace (min/km)":
+            trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
+            trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y1 + ": %{customdata}<extra></extra>"
+
+        fig_act.add_trace(
+            go.Scatter(
+                x=df_filtered["Data"], y=y1_series,
+                mode="lines+markers", name=y1,
+                line=dict(color=colors[idx]),
+                **trace_kwargs
+            ),
+            secondary_y=False,
         )
+        fig_act.update_yaxes(title_text=y1, secondary_y=False)
+        idx += 1
 
-        def series_for_act_daily(df: pd.DataFrame, colname: str) -> pd.Series:
-            # no gráfico, se for Pace (min/km), usamos a série numérica correta (minutos por km)
-            if colname == "Pace (min/km)":
-                return pd.to_numeric(df["PaceNumDaily"], errors="coerce")
-            return pd.to_numeric(df[colname], errors="coerce")
-
-        if selected_act_metrics and not df_filtered.empty:
-            fig_act = make_subplots(specs=[[{"secondary_y": True}]])
-            colors = px.colors.qualitative.Plotly
-            idx = 0
-
-            # 1º eixo
-            y1 = selected_act_metrics[0]
-            y1_series = series_for_act_daily(df_filtered, y1)
+        # 2º eixo
+        if len(selected_act_metrics) > 1:
+            y2 = selected_act_metrics[1]
+            y2_series = series_for_act_daily(df_filtered, y2)
             trace_kwargs = {}
-            if y1 == "Pace (min/km)":
-                # aqui o numérico é PaceNumDaily
+            if y2 == "Pace (min/km)":
                 trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
-                trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y1 + ": %{customdata}<extra></extra>"
+                trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y2 + ": %{customdata}<extra></extra>"
 
             fig_act.add_trace(
                 go.Scatter(
-                    x=df_filtered["Data"], y=y1_series,
-                    mode="lines+markers", name=y1,
+                    x=df_filtered["Data"], y=y2_series,
+                    mode="lines+markers", name=y2,
                     line=dict(color=colors[idx]),
                     **trace_kwargs
                 ),
-                secondary_y=False,
+                secondary_y=True,
             )
-            fig_act.update_yaxes(title_text=y1, secondary_y=False)
+            fig_act.update_yaxes(title_text=y2, secondary_y=True)
             idx += 1
 
-            # 2º eixo
-            if len(selected_act_metrics) > 1:
-                y2 = selected_act_metrics[1]
-                y2_series = series_for_act_daily(df_filtered, y2)
-                trace_kwargs = {}
-                if y2 == "Pace (min/km)":
-                    trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
-                    trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + y2 + ": %{customdata}<extra></extra>"
+        # extras
+        for m in selected_act_metrics[2:]:
+            m_series = series_for_act_daily(df_filtered, m)
+            trace_kwargs = {}
+            if m == "Pace (min/km)":
+                trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
+                trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + m + ": %{customdata}<extra></extra>"
 
-                fig_act.add_trace(
-                    go.Scatter(
-                        x=df_filtered["Data"], y=y2_series,
-                        mode="lines+markers", name=y2,
-                        line=dict(color=colors[idx]),
-                        **trace_kwargs
-                    ),
-                    secondary_y=True,
+            fig_act.add_trace(
+                go.Scatter(
+                    x=df_filtered["Data"], y=m_series,
+                    mode="lines+markers", name=m,
+                    line=dict(color=colors[idx % len(colors)]),
+                    yaxis="y2" if len(selected_act_metrics) > 1 else "y",
+                    **trace_kwargs
                 )
-                fig_act.update_yaxes(title_text=y2, secondary_y=True)
-                idx += 1
-
-            # extras -> mesmo eixo do 2º
-            for m in selected_act_metrics[2:]:
-                m_series = series_for_act_daily(df_filtered, m)
-                trace_kwargs = {}
-                if m == "Pace (min/km)":
-                    trace_kwargs["customdata"]    = pace_series_to_hover(df_filtered["PaceNumDaily"])
-                    trace_kwargs["hovertemplate"] = "%{x|%Y-%m-%d}<br>" + m + ": %{customdata}<extra></extra>"
-
-                fig_act.add_trace(
-                    go.Scatter(
-                        x=df_filtered["Data"], y=m_series,
-                        mode="lines+markers", name=m,
-                        line=dict(color=colors[idx % len(colors)]),
-                        yaxis="y2" if len(selected_act_metrics) > 1 else "y",
-                        **trace_kwargs
-                    )
-                )
-                idx += 1
-
-            fig_act.update_layout(
-                title=f"Evolução diária agregada — {selected_type}",
-                legend=dict(orientation="h", y=-0.2)
             )
-            st.plotly_chart(fig_act, use_container_width=True)
+            idx += 1
 
-        with st.expander("📋 Tabela de Atividades (agregado por dia)"):
-            st.dataframe(df_filtered)
+        fig_act.update_layout(
+            title=f"Evolução diária agregada — {selected_type_plot}",
+            legend=dict(orientation="h", y=-0.2)
+        )
+        st.plotly_chart(fig_act, use_container_width=True)
 
-        with st.expander("Ver tabela de atividades brutas (todas as sessões)"):
-            st.dataframe(acts_df)
+    with st.expander("📋 Tabela de Atividades (agregado por dia)"):
+        st.dataframe(df_filtered)
+
+    with st.expander("Ver tabela de atividades brutas (todas as sessões)"):
+        st.dataframe(acts_df)
 else:
     st.info("Nenhuma atividade encontrada ainda.")
 
-# ---------- INSIGHTS ----------
+
+# =========================================================
+# ==================  INSIGHTS & CORRELAÇÃO  ==============
+# =========================================================
 st.header("🔍 Insights (WTD / MTD / QTD / YTD / Total)")
 
 periods = ["WTD", "MTD", "QTD", "YTD", "TOTAL"]
 
-# colunas auxiliares
 if "Sono (h)" in daily_df.columns and "SonoHorasNum" not in daily_df.columns:
     daily_df["SonoHorasNum"] = pd.to_numeric(daily_df["Sono (h)"], errors="coerce")
 
@@ -691,18 +702,13 @@ insights = {
     "Sono REM (h) — Média":          {"col": "Sono REM (h)",         "mode": "mean", "fmt": "time"},
     "Sono Light (h) — Média":        {"col": "Sono Light (h)",       "mode": "mean", "fmt": "time"},
     "Qualidade do sono (score)":     {"col": "Sono (score)",         "mode": "mean", "fmt": "num"},
-
-    # Corrida (usar apenas dias com corrida > 0)
     "Distância corrida (km) — Soma": {"col": "Corrida (km)",         "mode": "sum",  "fmt": "num",  "only_positive": True, "filter_col": "Corrida (km)"},
     "Distância corrida (km) — Média":{"col": "Corrida (km)",         "mode": "mean", "fmt": "num",  "only_positive": True, "filter_col": "Corrida (km)"},
     "Pace médio (min/km)":           {"col": "PaceNum",              "mode": "mean", "fmt": "pace", "only_positive": True, "filter_col": "Corrida (km)"},
-
     "Passos — Média":                {"col": "Passos",               "mode": "mean", "fmt": "int"},
     "Calorias (total dia) — Média":  {"col": "Calorias (total dia)", "mode": "mean", "fmt": "num"},
     "Body Battery (máx)":            {"col": "Body Battery (máx)",   "mode": "mean", "fmt": "num"},
     "Stress médio":                  {"col": "Stress (média)",       "mode": "mean", "fmt": "num"},
-
-    # Breathwork: média (considerando >0)
     "Breathwork (min) — Média":      {"col": "Breathwork (min)",     "mode": "mean", "fmt": "int", "only_positive": True},
 }
 
@@ -735,13 +741,11 @@ corr_metrics = st.multiselect(
 
 if len(corr_metrics) >= 2:
     df_corr = daily_df.copy()
-    # usar série numérica para Pace
     if "Pace (min/km)" in corr_metrics and "PaceNum" in df_corr.columns:
         df_corr["Pace (min/km)"] = df_corr["PaceNum"]
     df_corr = df_corr[corr_metrics].apply(pd.to_numeric, errors="coerce").dropna()
     if not df_corr.empty:
         corr_matrix = df_corr.corr()
-
         fig_heat = px.imshow(
             corr_matrix,
             text_auto=True,
@@ -751,7 +755,6 @@ if len(corr_metrics) >= 2:
         )
         st.plotly_chart(fig_heat, use_container_width=True)
 
-        # scatter se escolher exatamente 2
         if len(corr_metrics) == 2:
             xcol, ycol = corr_metrics
             fig_scatter = px.scatter(
@@ -766,19 +769,3 @@ if len(corr_metrics) >= 2:
 else:
     st.info("Selecione pelo menos 2 métricas para ver correlações.")
 
-# ---------- HUD NOTION ----------
-st.header("🧾 HUD (preview) + Notion")
-
-try:
-    hud_md = gerar_hud_markdown(daily_df, acts_df, turtle_df)
-    st.code(hud_md, language="markdown")
-except Exception as e:
-    st.error("Falha ao gerar HUD.")
-    st.exception(e)
-    hud_md = None
-
-if st.button("⚔️ Atualizar HUD no Notion"):
-    if not hud_md:
-        st.error("Não foi possível gerar o HUD. Verifique os dados.")
-    else:
-        update_notion_block(NOTION_BLOCK_ID, hud_md)
