@@ -18,9 +18,9 @@ from garminconnect import Garmin
 GARMIN_EMAIL    = st.secrets["garmin"]["email"]
 GARMIN_PASSWORD = st.secrets["garmin"]["password"]
 
-USE_LAST_N_DAYS = True
+USE_LAST_N_DAYS = False
 LAST_N_DAYS     = 3
-START_DATE = "2023-01-01"
+START_DATE = "2024-02-20"
 END_DATE   = "2025-08-31"
 
 # ID da planilha no Google Sheets
