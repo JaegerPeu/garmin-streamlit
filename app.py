@@ -446,7 +446,7 @@ insights = {
 
     "Passos — Média":                {"col": "Passos",               "mode": "mean", "fmt": "int"},
     "Calorias (total dia) — Média":  {"col": "Calorias (total dia)", "mode": "mean", "fmt": "num"},
-    "Body Battery (média)":          {"col": "Body Battery (média)", "mode": "mean", "fmt": "num"},
+    "Body Battery (média)":          {"col": "Body Battery (máx)", "mode": "mean", "fmt": "num"},
     "Stress médio":                  {"col": "Stress (média)",       "mode": "mean", "fmt": "num"},
 
     # Breathwork: média (considerando >0)
