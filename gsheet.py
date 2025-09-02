@@ -161,6 +161,15 @@ def summarize_day(g: Garmin, day_iso: str) -> Tuple[Dict[str, Any], List[Dict[st
     stress = fetch_stress_avg(g, day_iso)
     stats = fetch_steps_and_calories(g, day_iso)
 
+    # Corrigir calorias: usar do dia anterior (pois o dia atual ainda não fechou)
+    if d == today:
+        try:
+            yesterday = (d - dt.timedelta(days=1)).isoformat()
+            stats_yesterday = fetch_steps_and_calories(g, yesterday)
+            stats["calories"] = stats_yesterday["calories"]
+        except Exception:
+            pass
+
     row = {
         "Data": day_iso,
         "Sono (h)": sleep["total_h"],
@@ -180,6 +189,7 @@ def summarize_day(g: Garmin, day_iso: str) -> Tuple[Dict[str, Any], List[Dict[st
         "Calorias (total dia)": stats["calories"],
         "Calorias (atividades)": total_cal_acts,
     }
+
     return row, acts, stats
 
 # ---------- Função para atualizar o Google Sheets ----------
