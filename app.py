@@ -32,6 +32,7 @@ client = gspread.authorize(creds)
 NOTION_TOKEN = st.secrets["notion"]["token"]
 NOTION_BLOCK_ID = st.secrets["notion"]["block_id"]
 NOTION_COUNTER_DB_ID = st.secrets["notion"]["counter_db_id"]
+NOTION_DAILYHUD_DB_ID = st.secrets["notion"].get("dailyhud_db_id", "")
 NOTION_VERSION = "2022-06-28"
 # =================================================
 
@@ -64,6 +65,183 @@ def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, st
             return True, "Atualizado!"
     except Exception as e:
         return False, str(e)
+# ---------- Helpers de Database Notion (upsert por Data) ----------
+def notion_get_database(db_id: str) -> dict:
+    url = f"https://api.notion.com/v1/databases/{db_id}"
+    r = requests.get(url, headers=_notion_headers(), timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+def notion_update_database_add_props(db_id: str, props_to_add: dict) -> None:
+    # props_to_add exemplo: {"Data": {"date": {}}, "Sono (h)": {"number": {}}}
+    if not props_to_add:
+        return
+    url = f"https://api.notion.com/v1/databases/{db_id}"
+    payload = {"properties": props_to_add}
+    r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=30)
+    r.raise_for_status()
+
+def notion_query_all_pages_by_date(db_id: str, date_prop: str = "Data") -> dict[str, str]:
+    """
+    Retorna { 'YYYY-MM-DD': page_id } de TODAS as páginas do DB (pagina com overwrite da mesma data vence).
+    """
+    url = f"https://api.notion.com/v1/databases/{db_id}/query"
+    existing: dict[str, str] = {}
+    payload = {"page_size": 100}
+    next_cursor = None
+
+    while True:
+        if next_cursor:
+            payload["start_cursor"] = next_cursor
+        r = requests.post(url, headers=_notion_headers(), data=json.dumps(payload), timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        for page in data.get("results", []):
+            props = page.get("properties", {})
+            if date_prop in props and props[date_prop].get("date") and props[date_prop]["date"].get("start"):
+                d = props[date_prop]["date"]["start"][:10]
+                existing[d] = page["id"]
+        if not data.get("has_more"):
+            break
+        next_cursor = data.get("next_cursor")
+    return existing
+
+def notion_create_page_in_db(db_id: str, properties: dict) -> str:
+    url = "https://api.notion.com/v1/pages"
+    payload = {"parent": {"database_id": db_id}, "properties": properties}
+    r = requests.post(url, headers=_notion_headers(), data=json.dumps(payload), timeout=30)
+    r.raise_for_status()
+    return r.json()["id"]
+
+def notion_update_page_props(page_id: str, properties: dict) -> None:
+    url = f"https://api.notion.com/v1/pages/{page_id}"
+    payload = {"properties": properties}
+    r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=30)
+    r.raise_for_status()
+
+# ---------- conversores ----------
+def _num_or_none(x):
+    try:
+        if x is None or (isinstance(x, float) and pd.isna(x)):
+            return None
+        v = float(x)
+        if pd.isna(v):
+            return None
+        return v
+    except Exception:
+        return None
+
+def _to_notion_number(x):
+    v = _num_or_none(x)
+    return {"number": v} if v is not None else None
+
+def _to_notion_rich_text(text: str):
+    if text is None or str(text).strip() == "":
+        return {"rich_text": []}
+    return {"rich_text": [{"type": "text", "text": {"content": str(text)}}]}
+
+def _to_notion_date(date_ts: pd.Timestamp | dt.date):
+    if pd.isna(date_ts):
+        return None
+    if isinstance(date_ts, pd.Timestamp):
+        d = date_ts.date()
+    else:
+        d = date_ts
+    return {"date": {"start": d.isoformat()}}
+
+def build_properties_from_row(row: pd.Series, numeric_cols: list[str], text_cols: list[str]) -> dict:
+    props = {}
+    # Data
+    if "Data" in row and not pd.isna(row["Data"]):
+        p = _to_notion_date(row["Data"])
+        if p: props["Data"] = p
+    # Números
+    for c in numeric_cols:
+        if c in row:
+            p = _to_notion_number(row[c])
+            if p is not None:
+                props[c] = p
+    # Textos (opcional)
+    for c in text_cols:
+        if c in row:
+            props[c] = _to_notion_rich_text(row[c])
+    return props
+
+def ensure_db_schema_for_dailyhud(db_id: str, numeric_cols: list[str], text_cols: list[str]) -> None:
+    """
+    Garante que o DB tenha as propriedades: Data (date) + colunas numéricas/texto.
+    """
+    db = notion_get_database(db_id)
+    existing = db.get("properties", {})
+    to_add = {}
+    if "Data" not in existing:
+        to_add["Data"] = {"date": {}}
+    for c in numeric_cols:
+        if c not in existing:
+            to_add[c] = {"number": {}}
+    for c in text_cols:
+        if c not in existing:
+            to_add[c] = {"rich_text": {}}
+    if to_add:
+        notion_update_database_add_props(db_id, to_add)
+
+def sync_entire_dailyhud_to_notion(daily_df: pd.DataFrame, db_id: str) -> tuple[int, int]:
+    """
+    Envia a ABA INTEIRA para o Notion (upsert por Data).
+    - Se a Data já existe no DB: atualiza.
+    - Se não existe: cria.
+    Retorna (criadas, atualizadas).
+    """
+    if not db_id:
+        raise ValueError("Defina `notion.dailyhud_db_id` em secrets.toml.")
+
+    df = daily_df.copy()
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.normalize()
+    df = df.dropna(subset=["Data"]).sort_values("Data")
+
+    # se houver linhas repetidas por Data na planilha, fica só a última
+    df = df.groupby(df["Data"].dt.date, as_index=False).last()
+    df["Data"] = pd.to_datetime(df["Data"])
+
+    # Cria PaceNum se não existir
+    if "PaceNum" not in df.columns and "Pace (min/km)" in df.columns:
+        df["PaceNum"] = df["Pace (min/km)"].apply(mmss_to_minutes)
+
+    # Colunas numéricas que vamos mandar (apenas as que existirem na planilha)
+    candidate_numeric = [
+        "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)", "Sono (score)",
+        "Body Battery (start)", "Body Battery (end)", "Body Battery (mín)",
+        "Body Battery (máx)", "Body Battery (média)",
+        "Stress (média)", "Passos", "Calorias (total dia)",
+        "Corrida (km)", "PaceNum", "Breathwork (min)"
+    ]
+    numeric_cols = [c for c in candidate_numeric if c in df.columns]
+    text_cols = []  # se tiver alguma coluna textual que queira levar junto, adicione aqui
+
+    # Garante schema no DB
+    ensure_db_schema_for_dailyhud(db_id, numeric_cols, text_cols)
+
+    # Busca todas as datas já existentes no DB (para evitar query por dia)
+    existing_map = notion_query_all_pages_by_date(db_id, date_prop="Data")
+
+    created, updated = 0, 0
+    for _, row in df.iterrows():
+        day_str = row["Data"].date().isoformat()
+        props = build_properties_from_row(row, numeric_cols, text_cols)
+
+        page_id = existing_map.get(day_str)
+        if page_id:
+            notion_update_page_props(page_id, props)
+            updated += 1
+        else:
+            page_id = notion_create_page_in_db(db_id, props)
+            existing_map[day_str] = page_id
+            created += 1
+
+        # Notion rate limit ~3 req/s
+        time.sleep(0.35)
+
+    return created, updated
 
 
 
@@ -323,6 +501,21 @@ if not acts_df.empty:
         .rename(columns={"DataDay": "Data"})
     )
     acts_daily["Pace (min/km)"] = acts_daily["PaceNumDaily"].apply(format_pace)
+
+# ========== AUTO-SYNC DailyHUD -> Notion (sem perguntar, sem escolher datas) ==========
+if NOTION_TOKEN and NOTION_DAILYHUD_DB_ID:
+    if "auto_synced_dailyhud" not in st.session_state:
+        with st.spinner("Sincronizando DailyHUD inteiro com o Notion..."):
+            try:
+                created, updated = sync_entire_dailyhud_to_notion(daily_df, NOTION_DAILYHUD_DB_ID)
+                st.session_state["auto_synced_dailyhud"] = True
+                st.success(f"✅ DailyHUD sincronizado! Criadas: {created} • Atualizadas: {updated}")
+            except Exception as e:
+                st.error("❌ Falha ao sincronizar DailyHUD com o Notion.")
+                st.exception(e)
+else:
+    st.info("Configure `notion.dailyhud_db_id` em `secrets.toml` para habilitar o envio automático ao Notion.")
+# ======================================================================================
 
 
 # =========================================================
