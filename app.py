@@ -54,8 +54,8 @@ if daily_df.empty:
 # Converter colunas
 daily_df["Data"] = pd.to_datetime(daily_df["Data"], errors="coerce")
 
-# ---------- VISUALIZAÇÕES ----------
-st.header("📈 Evolução das Métricas")
+# ---------- GRÁFICO MULTIMÉTRICAS ----------
+st.header("📊 Evolução das Métricas")
 
 metrics = [
     "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)", "Sono (score)",
@@ -64,11 +64,64 @@ metrics = [
     "Passos", "Calorias (total dia)", "Corrida (km)", "Pace (min/km)"
 ]
 
-selected_metrics = st.multiselect("📊 Escolha as métricas para visualizar:", metrics, default=["Sono (h)", "Sono (score)"])
+selected_metrics = st.multiselect(
+    "📊 Escolha as métricas para visualizar:",
+    metrics,
+    default=["Sono (h)", "Sono (score)"]
+)
 
 if selected_metrics:
-    fig = px.line(daily_df, x="Data", y=selected_metrics, markers=True)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    colors = px.colors.qualitative.Set2
+    color_idx = 0
+
+    # Primeiro eixo Y
+    y1 = selected_metrics[0]
+    fig.add_trace(
+        go.Scatter(
+            x=daily_df["Data"], y=daily_df[y1],
+            mode="lines+markers", name=y1, line=dict(color=colors[color_idx])
+        ),
+        secondary_y=False,
+    )
+    color_idx += 1
+
+    # Segundo eixo Y
+    if len(selected_metrics) > 1:
+        y2 = selected_metrics[1]
+        fig.add_trace(
+            go.Scatter(
+                x=daily_df["Data"], y=daily_df[y2],
+                mode="lines+markers", name=y2, line=dict(color=colors[color_idx])
+            ),
+            secondary_y=True,
+        )
+        color_idx += 1
+
+    # Extras → também no eixo secundário
+    for m in selected_metrics[2:]:
+        fig.add_trace(
+            go.Scatter(
+                x=daily_df["Data"], y=daily_df[m],
+                mode="lines+markers", name=m,
+                line=dict(color=colors[color_idx % len(colors)])
+            ),
+            secondary_y=True,
+        )
+        color_idx += 1
+
+    fig.update_layout(
+        title="Comparativo de Métricas Selecionadas",
+        legend=dict(orientation="h", y=-0.2),
+        margin=dict(l=40, r=40, t=40, b=40),
+    )
+    fig.update_xaxes(title="Data")
+    fig.update_yaxes(title=y1, secondary_y=False)
+    if len(selected_metrics) > 1:
+        fig.update_yaxes(title=selected_metrics[1], secondary_y=True)
+
     st.plotly_chart(fig, use_container_width=True)
+
 
 # ---------- CORRIDAS ----------
 st.header("🏃‍♀️ Corridas")
@@ -76,23 +129,76 @@ st.header("🏃‍♀️ Corridas")
 if not acts_df.empty:
     acts_df["Data"] = pd.to_datetime(acts_df["Data"], errors="coerce")
 
-    run_metrics = ["Distância (km)", "Pace (min/km)", "Calorias"]
-    selected_run_metrics = st.multiselect("Escolha métricas de corrida:", run_metrics, default=["Distância (km)", "Pace (min/km)"])
+    activity_types = acts_df["Tipo"].dropna().unique().tolist()
+    selected_type = st.selectbox("Escolha o tipo de atividade:", activity_types, index=0)
 
-    if selected_run_metrics:
-        fig_run = px.line(
-            acts_df[acts_df["Tipo"] == "running"],
-            x="Data",
-            y=selected_run_metrics,
-            markers=True,
-            title="Evolução das Corridas"
+    run_metrics = ["Distância (km)", "Pace (min/km)", "Calorias"]
+    selected_run_metrics = st.multiselect(
+        "Escolha métricas da atividade:",
+        run_metrics,
+        default=["Distância (km)", "Pace (min/km)"]
+    )
+
+    df_filtered = acts_df[acts_df["Tipo"] == selected_type]
+
+    if selected_run_metrics and not df_filtered.empty:
+        fig_run = make_subplots(specs=[[{"secondary_y": True}]])
+        colors = px.colors.qualitative.Plotly
+        color_idx = 0
+
+        # Primeiro eixo
+        y1 = selected_run_metrics[0]
+        fig_run.add_trace(
+            go.Scatter(
+                x=df_filtered["Data"], y=df_filtered[y1],
+                mode="lines+markers", name=y1,
+                line=dict(color=colors[color_idx])
+            ),
+            secondary_y=False,
         )
+        color_idx += 1
+
+        # Segundo eixo
+        if len(selected_run_metrics) > 1:
+            y2 = selected_run_metrics[1]
+            fig_run.add_trace(
+                go.Scatter(
+                    x=df_filtered["Data"], y=df_filtered[y2],
+                    mode="lines+markers", name=y2,
+                    line=dict(color=colors[color_idx])
+                ),
+                secondary_y=True,
+            )
+            color_idx += 1
+
+        # Extras
+        for m in selected_run_metrics[2:]:
+            fig_run.add_trace(
+                go.Scatter(
+                    x=df_filtered["Data"], y=df_filtered[m],
+                    mode="lines+markers", name=m,
+                    line=dict(color=colors[color_idx % len(colors)])
+                ),
+                secondary_y=True,
+            )
+            color_idx += 1
+
+        fig_run.update_layout(
+            title=f"Evolução das Atividades ({selected_type})",
+            legend=dict(orientation="h", y=-0.2)
+        )
+        fig_run.update_xaxes(title="Data")
+        fig_run.update_yaxes(title=y1, secondary_y=False)
+        if len(selected_run_metrics) > 1:
+            fig_run.update_yaxes(title=selected_run_metrics[1], secondary_y=True)
+
         st.plotly_chart(fig_run, use_container_width=True)
 
     st.subheader("📋 Tabela de Atividades")
-    st.dataframe(acts_df)
+    st.dataframe(df_filtered)
 else:
-    st.info("Nenhuma atividade de corrida encontrada ainda.")
+    st.info("Nenhuma atividade encontrada ainda.")
+
 
 # ---------- TABELA FINAL ----------
 st.header("📑 DailyHUD (dados brutos)")
