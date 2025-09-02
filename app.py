@@ -48,7 +48,6 @@ def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, st
     """
     Atualiza um code block existente no Notion (PATCH /v1/blocks/{block_id})
     substituindo o conteúdo pelo hud_text.
-    Requer: NOTION_TOKEN e block_id válido de um bloco do tipo 'code'.
     """
     try:
         payload = {
@@ -61,11 +60,12 @@ def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, st
         }
         url = f"https://api.notion.com/v1/blocks/{block_id}"
         r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=15)
-        if r.status_code in (200, 204):
+        if r.status_code == 200:
             return True, "Atualizado!"
         return False, f"HTTP {r.status_code}: {r.text}"
     except Exception as e:
         return False, str(e)
+
 
 
 # ---------- Utils básicos ----------
