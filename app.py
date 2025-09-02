@@ -25,6 +25,7 @@ creds = Credentials.from_service_account_info(service_account_info, scopes=scope
 client = gspread.authorize(creds)
 # =================================================
 
+
 # ---------- Utils ----------
 def load_sheet(sheet_name: str) -> pd.DataFrame:
     """Carrega uma aba da planilha do Google Sheets em DataFrame."""
@@ -37,17 +38,17 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         st.error(f"❌ Erro ao carregar aba {sheet_name}: {e}")
         return pd.DataFrame()
 
-def calc_period(df: pd.DataFrame, col: str, freq: str, date_col="Data", only_positive=False, mode="mean", filter_col=None) -> Optional[float]:
-    """Calcula métrica (média ou soma) em um período (WTD, MTD, QTD, YTD, TOTAL).
-       - only_positive: ignora valores <= 0
-       - filter_col: se informado, só calcula quando filter_col > 0 (ex: pace apenas em dias com corrida)
-    """
+def calc_period(df: pd.DataFrame, col: str, freq: str, date_col="Data", only_positive=False, mode="mean"):
+    """Calcula média ou soma por período (WTD, MTD, QTD, YTD, TOTAL)."""
     if col not in df.columns:
         return None
 
-    temp = df.copy()
-    temp[date_col] = pd.to_datetime(temp[date_col], errors="coerce")
-    temp[col] = pd.to_numeric(temp[col], errors="coerce")
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if df[col].dropna().empty:
+        return None
 
     today = dt.date.today()
     if freq == "WTD":
@@ -59,45 +60,44 @@ def calc_period(df: pd.DataFrame, col: str, freq: str, date_col="Data", only_pos
         start = dt.date(today.year, 3 * (q - 1) + 1, 1)
     elif freq == "YTD":
         start = dt.date(today.year, 1, 1)
-    else:  # TOTAL
-        start = temp[date_col].min().date()
+    else:
+        start = df[date_col].min().date()
 
-    mask = temp[date_col].dt.date >= start
-    subset = temp.loc[mask, [col]]
-
-    if filter_col and filter_col in temp.columns:
-        temp[filter_col] = pd.to_numeric(temp[filter_col], errors="coerce")
-        subset = temp.loc[(mask) & (temp[filter_col] > 0), [col]]
-
-    vals = subset[col].dropna()
-
+    mask = df[date_col].dt.date >= start
+    subset = df.loc[mask, col].dropna()
     if only_positive:
-        vals = vals[vals > 0]
+        subset = subset[subset > 0]
 
-    if vals.empty:
+    if subset.empty:
         return None
 
-    return float(vals.sum() if mode == "sum" else vals.mean())
+    if mode == "sum":
+        return subset.sum()
+    else:
+        return subset.mean()
 
-def format_metric(value: Optional[float], fmt: str) -> str:
-    """Formata métricas (horas, pace, passos, número, etc)."""
-    if value is None:
+def format_hours(value):
+    """Converte horas decimais em hh:mm para exibição."""
+    if pd.isna(value) or value == "":
         return "-"
-
-    if fmt == "pace":  # min/km em decimal → mm:ss
-        minutos = int(value)
-        segundos = int(round((value - minutos) * 60))
-        return f"{minutos}:{segundos:02d}"
-
-    if fmt == "time":  # horas decimais → h:mm
+    try:
         horas = int(float(value))
         minutos = int(round((float(value) - horas) * 60))
-        return f"{horas}h{minutos:02d}"
+        return f"{horas:02d}:{minutos:02d}"
+    except Exception:
+        return "-"
 
-    if fmt == "int":
-        return f"{value:,.0f}"
+def format_pace(value):
+    """Converte pace decimal em mm:ss para exibição."""
+    if pd.isna(value) or value == "" or float(value) == 0:
+        return "-"
+    try:
+        minutos = int(float(value))
+        segundos = int(round((float(value) - minutos) * 60))
+        return f"{minutos}:{segundos:02d}"
+    except Exception:
+        return "-"
 
-    return f"{value:.2f}"
 
 # ---------- APP ----------
 st.set_page_config(page_title="📊 Dashboard Garmin", layout="wide")
@@ -110,8 +110,7 @@ if st.button("🔄 Atualizar dados do Garmin"):
     with st.spinner("Conectando ao Garmin e atualizando planilha..."):
         try:
             gsheet.main()
-            st.cache_data.clear()
-            st.success("✅ Dados atualizados com sucesso! Recarregue a página para ver os novos dados.")
+            st.success("✅ Dados atualizados com sucesso!")
         except Exception as e:
             st.error("❌ Erro ao atualizar os dados")
             st.exception(e)
@@ -131,18 +130,12 @@ numeric_cols = [
     "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)",
     "Sono (score)", "Body Battery (start)", "Body Battery (end)",
     "Body Battery (mín)", "Body Battery (máx)", "Body Battery (média)",
-    "Stress (média)", "Passos", "Calorias (total dia)",
+    "Stress (média)", "Passos", "Calorias (total dia)", 
     "Corrida (km)", "Pace (min/km)", "Breathwork (min)"
 ]
 for c in numeric_cols:
     if c in daily_df.columns:
         daily_df[c] = pd.to_numeric(daily_df[c], errors="coerce")
-
-# Colunas auxiliares
-if "Pace (min/km)" in daily_df.columns:
-    daily_df["PaceNum"] = pd.to_numeric(daily_df["Pace (min/km)"], errors="coerce")
-if "Sono (h)" in daily_df.columns:
-    daily_df["SonoHorasNum"] = pd.to_numeric(daily_df["Sono (h)"], errors="coerce")
 
 # ---------- GRÁFICO MULTIMÉTRICAS ----------
 st.header("📊 Evolução das Métricas")
@@ -157,7 +150,7 @@ selected_metrics = st.multiselect(
 if selected_metrics:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     colors = px.colors.qualitative.Set2
-    idx = 0
+    color_idx = 0
 
     # Primeiro eixo Y
     y1 = selected_metrics[0]
@@ -165,12 +158,12 @@ if selected_metrics:
         go.Scatter(
             x=daily_df["Data"], y=daily_df[y1],
             mode="lines+markers", name=y1,
-            line=dict(color=colors[idx])
+            line=dict(color=colors[color_idx])
         ),
         secondary_y=False,
     )
     fig.update_yaxes(title_text=y1, secondary_y=False)
-    idx += 1
+    color_idx += 1
 
     # Segundo eixo Y
     if len(selected_metrics) > 1:
@@ -179,12 +172,12 @@ if selected_metrics:
             go.Scatter(
                 x=daily_df["Data"], y=daily_df[y2],
                 mode="lines+markers", name=y2,
-                line=dict(color=colors[idx])
+                line=dict(color=colors[color_idx])
             ),
             secondary_y=True,
         )
         fig.update_yaxes(title_text=y2, secondary_y=True)
-        idx += 1
+        color_idx += 1
 
     # Extras → mesmo eixo do segundo
     for m in selected_metrics[2:]:
@@ -192,11 +185,11 @@ if selected_metrics:
             go.Scatter(
                 x=daily_df["Data"], y=daily_df[m],
                 mode="lines+markers", name=m,
-                line=dict(color=colors[idx % len(colors)]),
+                line=dict(color=colors[color_idx % len(colors)]),
                 yaxis="y2" if len(selected_metrics) > 1 else "y"
             )
         )
-        idx += 1
+        color_idx += 1
 
     fig.update_layout(
         title="Comparativo de Métricas Selecionadas",
@@ -214,29 +207,164 @@ if not acts_df.empty:
     activity_types = acts_df["Tipo"].dropna().unique().tolist()
     selected_type = st.selectbox("Escolha o tipo de atividade:", activity_types, index=0)
 
-    df_filtered = acts_df[acts_df["Tipo"] == selected_type]
-
-    act_metrics = ["Distância (km)", "Pace (min/km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx"]
+    # Seleciona métricas de acordo com o tipo
+    act_metrics = ["Distância (km)", "Pace (min/km)", "Calorias", "Duração (min)", "FC Média", "VO2 Máx"]
     selected_act_metrics = st.multiselect(
         "Escolha métricas da atividade:",
         act_metrics,
         default=["Distância (km)", "Pace (min/km)"]
     )
 
+    df_filtered = acts_df[acts_df["Tipo"] == selected_type]
+
     if selected_act_metrics and not df_filtered.empty:
         fig_act = make_subplots(specs=[[{"secondary_y": True}]])
         colors = px.colors.qualitative.Plotly
-        idx = 0
+        color_idx = 0
 
+        # Primeiro eixo
         y1 = selected_act_metrics[0]
         fig_act.add_trace(
             go.Scatter(
-                x=df_filtered["Data"], y=pd.to_numeric(df_filtered[y1], errors="coerce"),
+                x=df_filtered["Data"], y=df_filtered[y1],
                 mode="lines+markers", name=y1,
-                line=dict(color=colors[idx])
+                line=dict(color=colors[color_idx])
             ),
             secondary_y=False,
         )
         fig_act.update_yaxes(title_text=y1, secondary_y=False)
-        idx += 1
+        color_idx += 1
 
+        # Segundo eixo
+        if len(selected_act_metrics) > 1:
+            y2 = selected_act_metrics[1]
+            fig_act.add_trace(
+                go.Scatter(
+                    x=df_filtered["Data"], y=df_filtered[y2],
+                    mode="lines+markers", name=y2,
+                    line=dict(color=colors[color_idx])
+                ),
+                secondary_y=True,
+            )
+            fig_act.update_yaxes(title_text=y2, secondary_y=True)
+            color_idx += 1
+
+        # Extras
+        for m in selected_act_metrics[2:]:
+            fig_act.add_trace(
+                go.Scatter(
+                    x=df_filtered["Data"], y=df_filtered[m],
+                    mode="lines+markers", name=m,
+                    line=dict(color=colors[color_idx % len(colors)]),
+                    yaxis="y2" if len(selected_act_metrics) > 1 else "y"
+                )
+            )
+            color_idx += 1
+
+        fig_act.update_layout(title=f"Evolução de {selected_type}", legend=dict(orientation="h", y=-0.2))
+        st.plotly_chart(fig_act, use_container_width=True)
+
+    st.subheader("📋 Tabela de Atividades")
+    st.dataframe(df_filtered)
+else:
+    st.info("Nenhuma atividade encontrada ainda.")
+
+# ---------- INSIGHTS ----------
+st.header("🔍 Insights (WTD / MTD / QTD / YTD / Total)")
+
+periods = ["WTD", "MTD", "QTD", "YTD", "TOTAL"]
+insights = {
+    "Sono (h)": {"col": "Sono (h)", "mode": "mean", "format": "time"},
+    "Sono Deep (h)": {"col": "Sono Deep (h)", "mode": "mean", "format": "time"},
+    "Sono REM (h)": {"col": "Sono REM (h)", "mode": "mean", "format": "time"},
+    "Sono Light (h)": {"col": "Sono Light (h)", "mode": "mean", "format": "time"},
+    "Qualidade do sono (score)": {"col": "Sono (score)", "mode": "mean", "format": "num"},
+    "Distância corrida (km) — Média": {"col": "Corrida (km)", "mode": "mean", "format": "num_pos"},
+    "Pace médio (min/km)": {"col": "Pace (min/km)", "mode": "mean", "format": "pace", "only_positive": True},
+    "Distância corrida (km) — Soma": {"col": "Corrida (km)", "mode": "sum", "format": "num_pos"},
+    "Passos — Média": {"col": "Passos", "mode": "mean", "format": "int"},
+    "Calorias (total dia) — Média": {"col": "Calorias (total dia)", "mode": "mean", "format": "num"},
+    "Body Battery (média)": {"col": "Body Battery (média)", "mode": "mean", "format": "num"},
+    "Stress médio": {"col": "Stress (média)", "mode": "mean", "format": "num"},
+    "Breathwork (min) — Média": {"col": "Breathwork (min)", "mode": "mean", "format": "int", "only_positive": True},
+}
+
+insight_data = []
+for label, cfg in insights.items():
+    col = cfg["col"]
+    mode = cfg.get("mode", "mean")
+    only_positive = cfg.get("only_positive", False)
+    fmt = cfg.get("format", "num")
+
+    row_data = {"Métrica": label}
+    for p in periods:
+        val = calc_period(daily_df, col, p, only_positive=only_positive, mode=mode)
+        if val is None:
+            row_data[p] = "-"
+        else:
+            if fmt == "time":
+                row_data[p] = format_hours(val)
+            elif fmt == "pace":
+                row_data[p] = format_pace(val)
+            elif fmt == "int":
+                row_data[p] = f"{val:,.0f}"
+            else:
+                row_data[p] = f"{val:.2f}"
+    insight_data.append(row_data)
+
+insight_df = pd.DataFrame(insight_data).set_index("Métrica")
+st.dataframe(insight_df)
+
+# ---------- MATRIZ DE CORRELAÇÃO ----------
+st.header("📊 Matriz de Correlação")
+
+corr_metrics = st.multiselect(
+    "Escolha métricas para calcular correlação:",
+    metrics,
+    default=["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)"]
+)
+
+if len(corr_metrics) >= 2:
+    df_corr = daily_df.copy()
+    df_corr = df_corr[corr_metrics].apply(pd.to_numeric, errors="coerce").dropna()
+    corr_matrix = df_corr.corr()
+
+    fig_heat = px.imshow(
+        corr_matrix,
+        text_auto=True,
+        color_continuous_scale="RdBu",
+        zmin=-1, zmax=1,
+        title="Matriz de Correlação"
+    )
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    # scatter se escolher exatamente 2
+    if len(corr_metrics) == 2:
+        xcol, ycol = corr_metrics
+        fig_scatter = px.scatter(
+            df_corr,
+            x=xcol, y=ycol,
+            trendline="ols",
+            title=f"Relação: {xcol} x {ycol}"
+        )
+        st.plotly_chart(fig_scatter, use_container_width=True)
+else:
+    st.info("Selecione pelo menos 2 métricas para ver correlações.")
+
+# ---------- TABELA FINAL ----------
+st.header("📑 DailyHUD (dados brutos)")
+
+df_display = daily_df.copy()
+if "Sono (h)" in df_display.columns:
+    df_display["Sono (h)"] = df_display["Sono (h)"].apply(format_hours)
+    if "Sono Deep (h)" in df_display.columns:
+        df_display["Sono Deep (h)"] = df_display["Sono Deep (h)"].apply(format_hours)
+    if "Sono REM (h)" in df_display.columns:
+        df_display["Sono REM (h)"] = df_display["Sono REM (h)"].apply(format_hours)
+    if "Sono Light (h)" in df_display.columns:
+        df_display["Sono Light (h)"] = df_display["Sono Light (h)"].apply(format_hours)
+
+if "Pace (min/km)" in df_display.columns:
+    df_display["Pace (min/km)"] = df_display["Pace (min/km)"].apply(format_pace)
+
+st.dataframe(df_display)
