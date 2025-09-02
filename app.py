@@ -408,9 +408,8 @@ for m in selected_act_metrics[2:]:
         )
     )
     idx += 1
-
-
-            fig_act.update_layout(
+    
+    fig_act.update_layout(
                 title=f"Evolução diária agregada — {selected_type}",
                 legend=dict(orientation="h", y=-0.2)
             )
