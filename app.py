@@ -5,7 +5,7 @@ from gspread_dataframe import get_as_dataframe
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 import plotly.graph_objects as go
-import garmin_to_gsheets
+import gsheet
 import datetime as dt
 
 # ================= CONFIGURAÇÃO ==================
