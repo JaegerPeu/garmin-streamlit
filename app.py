@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import gsheet
 import datetime as dt
-
+from typing import List, Dict, Any, Optional, Tuple  # <-- ADICIONE ESTA LINHA
 # ================= CONFIGURAÇÃO ==================
 GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"  # confirme se está certo
 
