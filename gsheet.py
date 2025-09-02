@@ -1,13 +1,17 @@
 import streamlit as st
-import gspread
 from google.oauth2.service_account import Credentials
+import gspread
 
-st.set_page_config(page_title="Teste Google Sheets", page_icon="✅", layout="centered")
+# Lê credenciais direto do secrets do Streamlit
+service_account_info = st.secrets["gcp_service_account"]
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
 
-st.title("🔗 Teste de Conexão com Google Sheets")
+client = gspread.authorize(creds)
 
-# ID da sua planilha (peguei do link que você mandou)
+# ID da sua planilha
 GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"
+
 
 def connect_gsheets():
     try:
