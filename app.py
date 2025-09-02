@@ -4,7 +4,7 @@ import gspread
 from gspread_dataframe import get_as_dataframe
 from google.oauth2.service_account import Credentials
 import plotly.express as px
-import garmin_to_gsheets
+import gsheet
 
 # ================= CONFIGURAÇÃO ==================
 GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"  # coloque o ID completo da sua planilha
