@@ -476,9 +476,9 @@ else:
 #if "Sono (h)" in df_display.columns:
  #   df_display["Sono (h)"] = df_display["Sono (h)"].apply(format_hours)
   #  if "Sono Deep (h)" in df_display.columns:
-        df_display["Sono Deep (h)"] = df_display["Sono Deep (h)"].apply(format_hours)
+       # df_display["Sono Deep (h)"] = df_display["Sono Deep (h)"].apply(format_hours)
    # if "Sono REM (h)" in df_display.columns:
-        df_display["Sono REM (h)"] = df_display["Sono REM (h)"].apply(format_hours)
+        #df_display["Sono REM (h)"] = df_display["Sono REM (h)"].apply(format_hours)
     #if "Sono Light (h)" in df_display.columns:
      #   df_display["Sono Light (h)"] = df_display["Sono Light (h)"].apply(format_hours)
 
