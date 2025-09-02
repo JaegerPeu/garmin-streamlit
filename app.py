@@ -29,8 +29,9 @@ creds = Credentials.from_service_account_info(service_account_info, scopes=scope
 client = gspread.authorize(creds)
 
 # Notion (opcional, para enviar HUD)
-NOTION_TOKEN = st.secrets.get("notion_token")       # obrig. para enviar
-NOTION_BLOCK_ID = st.secrets.get("notion_block_id") # opcional
+NOTION_TOKEN = st.secrets["notion"]["token"]
+NOTION_BLOCK_ID = st.secrets["notion"]["block_id"]
+NOTION_COUNTER_DB_ID = st.secrets["notion"]["counter_db_id"]
 NOTION_VERSION = "2022-06-28"
 # =================================================
 
