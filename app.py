@@ -5,6 +5,7 @@ from gspread_dataframe import get_as_dataframe
 from google.oauth2.service_account import Credentials
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import gsheet
 import datetime as dt
 
@@ -56,15 +57,13 @@ def calc_period_avg(df: pd.DataFrame, col: str, freq: str, date_col="Data"):
     mask = df[date_col].dt.date >= start
     return df.loc[mask, col].dropna().mean()
 
-# =================================================
-# APP STREAMLIT
-# =================================================
+# ---------- APP ----------
 st.set_page_config(page_title="📊 Dashboard Garmin", layout="wide")
 
 st.title("🏃‍♂️ Dashboard de Atividades Garmin")
 st.write("Sincronize seus dados do Garmin com o Google Sheets e veja análises em tempo real.")
 
-# Botão de atualização
+# Botão para atualizar planilha
 if st.button("🔄 Atualizar dados do Garmin"):
     with st.spinner("Conectando ao Garmin e atualizando planilha..."):
         try:
@@ -82,11 +81,21 @@ if daily_df.empty:
     st.warning("Nenhum dado encontrado na aba `DailyHUD`. Clique em **Atualizar dados** acima.")
     st.stop()
 
-# Converter colunas
+# Converter colunas numéricas
 daily_df["Data"] = pd.to_datetime(daily_df["Data"], errors="coerce")
 
-# ---------- VISUALIZAÇÕES ----------
-st.header("📈 Evolução das Métricas")
+numeric_cols = [
+    "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)", 
+    "Sono (score)", "Body Battery (start)", "Body Battery (end)", 
+    "Body Battery (mín)", "Body Battery (máx)", "Body Battery (média)", 
+    "Stress (média)", "Passos", "Calorias (total dia)", "Corrida (km)"
+]
+for c in numeric_cols:
+    if c in daily_df.columns:
+        daily_df[c] = pd.to_numeric(daily_df[c], errors="coerce")
+
+# ---------- GRÁFICO MULTIMÉTRICAS ----------
+st.header("📊 Evolução das Métricas")
 
 metrics = [
     "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)", "Sono (score)",
@@ -95,10 +104,66 @@ metrics = [
     "Passos", "Calorias (total dia)", "Corrida (km)", "Pace (min/km)"
 ]
 
-selected_metrics = st.multiselect("📊 Escolha as métricas para visualizar:", metrics, default=["Sono (h)", "Sono (score)"])
+selected_metrics = st.multiselect("Escolha as métricas para visualizar:", metrics, default=["Sono (h)", "Sono (score)"])
 
 if selected_metrics:
-    fig = px.line(daily_df, x="Data", y=selected_metrics, markers=True)
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    colors = px.colors.qualitative.Set2
+    color_idx = 0
+
+    # Primeiro eixo Y (esquerdo)
+    y1 = selected_metrics[0]
+    fig.add_trace(
+        go.Scatter(
+            x=daily_df["Data"],
+            y=daily_df[y1],
+            mode="lines+markers",
+            name=y1,
+            line=dict(color=colors[color_idx])
+        ),
+        secondary_y=False,
+    )
+    color_idx += 1
+
+    # Segundo eixo Y (direito, se existir)
+    if len(selected_metrics) > 1:
+        y2 = selected_metrics[1]
+        fig.add_trace(
+            go.Scatter(
+                x=daily_df["Data"],
+                y=daily_df[y2],
+                mode="lines+markers",
+                name=y2,
+                line=dict(color=colors[color_idx])
+            ),
+            secondary_y=True,
+        )
+        color_idx += 1
+
+    # Métricas extras também vão no eixo secundário
+    for m in selected_metrics[2:]:
+        fig.add_trace(
+            go.Scatter(
+                x=daily_df["Data"],
+                y=daily_df[m],
+                mode="lines+markers",
+                name=m,
+                line=dict(color=colors[color_idx % len(colors)])
+            ),
+            secondary_y=True,
+        )
+        color_idx += 1
+
+    fig.update_layout(
+        title="Comparativo de Métricas Selecionadas",
+        legend=dict(orientation="h", y=-0.2),
+        margin=dict(l=40, r=40, t=40, b=40),
+    )
+    fig.update_xaxes(title="Data")
+    fig.update_yaxes(title=y1, secondary_y=False)
+    if len(selected_metrics) > 1:
+        fig.update_yaxes(title=selected_metrics[1], secondary_y=True)
+
     st.plotly_chart(fig, use_container_width=True)
 
 # ---------- CORRIDAS ----------
@@ -111,13 +176,36 @@ if not acts_df.empty:
     selected_run_metrics = st.multiselect("Escolha métricas de corrida:", run_metrics, default=["Distância (km)", "Pace (min/km)"])
 
     if selected_run_metrics:
-        fig_run = px.line(
-            acts_df[acts_df["Tipo"] == "running"],
-            x="Data",
-            y=selected_run_metrics,
-            markers=True,
-            title="Evolução das Corridas"
-        )
+        fig_run = make_subplots(specs=[[{"secondary_y": True}]])
+        colors = px.colors.qualitative.Plotly
+        if selected_run_metrics:
+            y1 = selected_run_metrics[0]
+            fig_run.add_trace(
+                go.Scatter(
+                    x=acts_df[acts_df["Tipo"] == "running"]["Data"],
+                    y=acts_df[acts_df["Tipo"] == "running"][y1],
+                    mode="lines+markers",
+                    name=y1,
+                    line=dict(color=colors[0])
+                ),
+                secondary_y=False,
+            )
+        if len(selected_run_metrics) > 1:
+            y2 = selected_run_metrics[1]
+            fig_run.add_trace(
+                go.Scatter(
+                    x=acts_df[acts_df["Tipo"] == "running"]["Data"],
+                    y=acts_df[acts_df["Tipo"] == "running"][y2],
+                    mode="lines+markers",
+                    name=y2,
+                    line=dict(color=colors[1])
+                ),
+                secondary_y=True,
+            )
+            fig_run.update_yaxes(title_text=y1, secondary_y=False)
+            fig_run.update_yaxes(title_text=y2, secondary_y=True)
+
+        fig_run.update_layout(title="Métricas de Corrida", legend=dict(orientation="h", y=-0.2))
         st.plotly_chart(fig_run, use_container_width=True)
 
     st.subheader("📋 Tabela de Atividades")
@@ -128,54 +216,72 @@ else:
 # ---------- INSIGHTS ----------
 st.header("🔍 Insights (WTD / MTD / QTD / YTD / Total)")
 
-periods = ["WTD", "MTD", "QTD", "YTD", "TOTAL"]
 insights = {
     "Sono médio (h)": "Sono (h)",
+    "Qualidade do sono (score)": "Sono (score)",
     "Distância corrida (km)": "Corrida (km)",
     "Pace médio (min/km)": "Pace (min/km)",
-    "Stress médio": "Stress (média)"
+    "Passos": "Passos",
+    "Calorias (total dia)": "Calorias (total dia)",
+    "Body Battery (média)": "Body Battery (média)",
 }
 
-insight_table = {}
+insight_data = []
 for label, col in insights.items():
-    insight_table[label] = []
-    for p in periods:
-        val = calc_period_avg(daily_df, col, p)
+    row_data = {"Métrica": label}
+    for period in ["WTD", "MTD", "QTD", "YTD", "TOTAL"]:
+        val = calc_period_avg(daily_df, col, period)
         if val is None:
-            insight_table[label].append("-")
+            row_data[period] = "-"
         else:
             if "Pace" in label:
-                insight_table[label].append(f"{val:.2f}")
+                minutos = int(val)
+                segundos = int(round((val - minutos) * 60))
+                row_data[period] = f"{minutos}:{segundos:02d}"
             elif "Passos" in label:
-                insight_table[label].append(f"{val:,.0f}")
+                row_data[period] = f"{val:,.0f}"
             else:
-                insight_table[label].append(f"{val:.2f}")
+                row_data[period] = f"{val:.2f}"
+    insight_data.append(row_data)
 
-insight_df = pd.DataFrame(insight_table, index=periods)
+insight_df = pd.DataFrame(insight_data).set_index("Métrica")
 st.dataframe(insight_df)
 
 # ---------- CORRELAÇÕES ----------
-st.header("📊 Correlações")
+st.header("📊 Explorar Correlações")
 
 corr_options = {
     "Sono (h) x Sono (score)": ("Sono (h)", "Sono (score)"),
     "Sono (h) x Stress (média)": ("Sono (h)", "Stress (média)"),
     "Stress (média) x Sono (score)": ("Stress (média)", "Sono (score)"),
-    "Dias com corrida x Sono (score)": ("Corrida (km)", "Sono (score)"),
+    "Dias com corrida (km>0) x Sono (score)": ("Corrida (km)", "Sono (score)"),
     "Calorias (total dia) x Sono (h)": ("Calorias (total dia)", "Sono (h)"),
-    "Distância corrida (km) x Stress": ("Corrida (km)", "Stress (média)"),
+    "Distância corrida (km) x Stress (média)": ("Corrida (km)", "Stress (média)"),
 }
 
-choice = st.selectbox("Escolha uma correlação:", list(corr_options.keys()))
+choice = st.selectbox("Escolha a correlação:", list(corr_options.keys()))
 
 xcol, ycol = corr_options[choice]
 df_corr = daily_df.copy()
+
 df_corr[xcol] = pd.to_numeric(df_corr[xcol], errors="coerce")
 df_corr[ycol] = pd.to_numeric(df_corr[ycol], errors="coerce")
 
-fig_corr = px.scatter(df_corr, x=xcol, y=ycol, trendline="ols", title=f"Correlação: {choice}")
+# Caso especial: "dias com corrida x sono"
+if "Dias com corrida" in choice:
+    df_corr["Dias com corrida"] = df_corr["Corrida (km)"].apply(lambda x: 1 if pd.notna(x) and float(x) > 0 else 0)
+
+fig_corr = px.scatter(
+    df_corr,
+    x=xcol,
+    y=ycol,
+    trendline="ols",
+    title=f"Correlação: {choice}"
+)
 st.plotly_chart(fig_corr, use_container_width=True)
 
 # ---------- TABELA FINAL ----------
 st.header("📑 DailyHUD (dados brutos)")
 st.dataframe(daily_df)
+
+
