@@ -1,9 +1,8 @@
 # garmin_to_gsheets.py
 # ----------------------------------------------------
 # Coleta dados do Garmin e salva direto no Google Sheets
-# - Aba "DailyHUD": 1 linha por dia (sono, score, body battery, stress, corrida, pace, passos, calorias)
-# - Aba "Activities": 1 linha por atividade (com Pace por atividade)
-# - Rodadas futuras mesclam com o conteúdo existente (sem duplicar)
+# - Aba "DailyHUD": 1 linha por dia (sem duplicar Data)
+# - Aba "Activities": 1 linha por atividade (sem duplicar ID)
 # ----------------------------------------------------
 
 import datetime as dt
@@ -21,11 +20,11 @@ GARMIN_PASSWORD = st.secrets["garmin"]["password"]
 
 USE_LAST_N_DAYS = True
 LAST_N_DAYS     = 3
-START_DATE = "2024-02-19"
+START_DATE = "2023-01-01"
 END_DATE   = "2025-08-31"
 
-# ID da planilha no Google Sheets (já compartilhada com a service account)
-GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"  # substitua pelo ID da sua planilha
+# ID da planilha no Google Sheets
+GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"
 
 # Credenciais do Google (do secrets do Streamlit)
 service_account_info = st.secrets["gcp_service_account"]
@@ -34,21 +33,26 @@ creds = Credentials.from_service_account_info(service_account_info, scopes=scope
 client = gspread.authorize(creds)
 # ===========================================
 
+
 # ---------- Utilidades ----------
 def login_garmin() -> Garmin:
     g = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
     g.login()
     return g
 
+
 def daterange(start_date: dt.date, end_date: dt.date):
     for n in range((end_date - start_date).days + 1):
         yield start_date + dt.timedelta(n)
 
-def pace_str(total_seconds: Optional[float], km: Optional[float]) -> str:
+
+def pace_str(total_seconds: Optional[float], km: Optional[float]) -> Optional[float]:
+    """Retorna pace em minutos/km (como número float, ex: 5.23 = 5m23s)."""
     if not km or km == 0 or not total_seconds:
-        return ""
-    sec_per_km = int(total_seconds / km)
-    return f"{sec_per_km // 60:02d}:{sec_per_km % 60:02d}"
+        return None
+    sec_per_km = total_seconds / km
+    return round(sec_per_km / 60, 2)
+
 
 # ---------- Fetchers ----------
 def fetch_activities_by_day(g: Garmin, day_iso: str) -> List[Dict[str, Any]]:
@@ -56,6 +60,7 @@ def fetch_activities_by_day(g: Garmin, day_iso: str) -> List[Dict[str, Any]]:
         return g.get_activities_by_date(day_iso, day_iso) or []
     except Exception:
         return []
+
 
 def fetch_sleep(g: Garmin, day_iso: str) -> Dict[str, Any]:
     out = {"total_h": None, "deep_h": None, "rem_h": None, "light_h": None, "awake_min": None, "score": None}
@@ -85,6 +90,7 @@ def fetch_sleep(g: Garmin, day_iso: str) -> Dict[str, Any]:
         pass
     return out
 
+
 def fetch_body_battery(g: Garmin, day_iso: str) -> Dict[str, Optional[float]]:
     out = {"bb_start": None, "bb_end": None, "bb_min": None, "bb_max": None, "bb_avg": None}
     try:
@@ -97,6 +103,7 @@ def fetch_body_battery(g: Garmin, day_iso: str) -> Dict[str, Optional[float]]:
         pass
     return out
 
+
 def fetch_stress_avg(g: Garmin, day_iso: str) -> Optional[float]:
     try:
         stats = g.get_stats(day_iso) or {}
@@ -107,15 +114,17 @@ def fetch_stress_avg(g: Garmin, day_iso: str) -> Optional[float]:
         pass
     return None
 
+
 def fetch_steps_and_calories(g: Garmin, day_iso: str) -> Dict[str, Any]:
     out = {"steps": None, "calories": None}
     try:
         stats = g.get_stats(day_iso) or {}
-        out["steps"]    = stats.get("totalSteps") if stats.get("totalSteps") is not None else stats.get("steps")
-        out["calories"] = stats.get("totalKilocalories") if stats.get("totalKilocalories") is not None else stats.get("calories")
+        out["steps"]    = stats.get("totalSteps")
+        out["calories"] = stats.get("totalKilocalories")
     except Exception:
         pass
     return out
+
 
 # ---------- Builders ----------
 def normalize_activity(a: Dict[str, Any]) -> Dict[str, Any]:
@@ -123,7 +132,7 @@ def normalize_activity(a: Dict[str, Any]) -> Dict[str, Any]:
     duration_sec = a.get("duration") or 0
     distance_km  = (a.get("distance") or 0) / 1000.0
 
-    activity_pace = ""
+    activity_pace = None
     if tkey == "running" and distance_km > 0 and duration_sec > 0:
         activity_pace = pace_str(duration_sec, distance_km)
 
@@ -144,6 +153,7 @@ def normalize_activity(a: Dict[str, Any]) -> Dict[str, Any]:
         "Nome": a.get("activityName") or "",
     }
 
+
 def summarize_day(g: Garmin, day_iso: str, today: dt.date) -> Dict[str, Any]:
     acts = fetch_activities_by_day(g, day_iso)
 
@@ -158,11 +168,9 @@ def summarize_day(g: Garmin, day_iso: str, today: dt.date) -> Dict[str, Any]:
 
     sleep = fetch_sleep(g, day_iso)
     bb = fetch_body_battery(g, day_iso)
-
-    # Pegar steps e calorias
     stats = fetch_steps_and_calories(g, day_iso)
 
-    # Para o dia atual, usar os dados do dia anterior (fechados) para calorias e passos
+    # Ajuste: calorias/passos do dia atual -> pegar do dia anterior (fechado)
     if day_iso == today.isoformat():
         try:
             yesterday = (today - dt.timedelta(days=1)).isoformat()
@@ -188,7 +196,6 @@ def summarize_day(g: Garmin, day_iso: str, today: dt.date) -> Dict[str, Any]:
         "Body Battery (end)": bb["bb_end"],
         "Body Battery (mín)": bb["bb_min"],
         "Body Battery (máx)": bb["bb_max"],
-        "Body Battery (média)": bb["bb_avg"],
         "Stress (média)": stress,
         "Corrida (km)": round(total_run_km, 2),
         "Pace (min/km)": pace_str(total_run_sec, total_run_km),
@@ -198,26 +205,31 @@ def summarize_day(g: Garmin, day_iso: str, today: dt.date) -> Dict[str, Any]:
     }
     return row, acts, stats
 
-# ---------- Função para atualizar Google Sheets ----------
-def update_sheet(df, sheet_name, key_cols, sort_by):
+
+# ---------- Atualização no Google Sheets ----------
+def update_sheet(df_new, sheet_name, key_cols, sort_by):
+    """Atualiza a aba no Google Sheets adicionando apenas valores novos, sem duplicar."""
     sheet = client.open_by_key(GSHEET_ID)
     try:
         ws = sheet.worksheet(sheet_name)
     except Exception:
         ws = sheet.add_worksheet(title=sheet_name, rows="1000", cols="20")
 
+    # Lê dados existentes
     old_df = get_as_dataframe(ws, evaluate_formulas=False, header=0)
-    old_df = old_df.dropna(how= "all")
+    old_df = old_df.dropna(how="all")
 
     if not old_df.empty:
-        df_merged = pd.concat([old_df, df], ignore_index=True).drop_duplicates(subset=key_cols, keep="last")
+        df_merged = pd.concat([old_df, df_new], ignore_index=True)
+        df_merged = df_merged.drop_duplicates(subset=key_cols, keep="last")
         if sort_by in df_merged.columns:
             df_merged = df_merged.sort_values(sort_by).reset_index(drop=True)
     else:
-        df_merged = df
+        df_merged = df_new
 
     ws.clear()
     set_with_dataframe(ws, df_merged)
+
 
 # ---------- Main ----------
 def main():
@@ -244,7 +256,7 @@ def main():
     new_daily = pd.DataFrame(daily_rows)
     new_acts  = pd.DataFrame(activities_rows)
 
-    # Atualiza apenas abas principais
+    # Atualiza abas no Google Sheets (sem duplicar)
     update_sheet(new_daily, "DailyHUD", ["Data"], "Data")
     update_sheet(new_acts, "Activities", ["ID"], "Data")
 
