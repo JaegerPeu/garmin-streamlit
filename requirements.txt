@@ -6,3 +6,4 @@ plotly
 gspread
 gspread-dataframe
 google-auth
+garminconnect
