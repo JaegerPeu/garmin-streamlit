@@ -3,12 +3,10 @@
 # Coleta dados do Garmin e salva direto no Google Sheets
 # - Aba "DailyHUD": 1 linha por dia
 # - Aba "Activities": 1 linha por atividade (com Pace por atividade)
-# - Abas RAW para auditoria: Raw_Summary, Raw_Sleep, Raw_Stats
 # - Rodadas futuras mesclam com o conteúdo existente (sem duplicar)
 # ----------------------------------------------------
 
 import datetime as dt
-import json
 from typing import List, Dict, Any, Optional, Tuple
 import pandas as pd
 import gspread
@@ -26,7 +24,7 @@ LAST_N_DAYS     = 3
 START_DATE = "2023-01-01"
 END_DATE   = "2025-08-31"
 
-# ID da planilha no Google Sheets (já compartilhada com a service account)
+# ID da planilha no Google Sheets
 GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"
 
 # Credenciais do Google (do secrets do Streamlit)
@@ -51,40 +49,6 @@ def pace_str(total_seconds: Optional[float], km: Optional[float]) -> str:
         return ""
     sec_per_km = int(total_seconds / km)
     return f"{sec_per_km // 60:02d}:{sec_per_km % 60:02d}"
-
-# ---------- Sleep helpers ----------
-def _extract_sleep_score(sleep_obj: dict, dto: dict) -> Optional[float]:
-    direct_candidates = [
-        (sleep_obj or {}).get("sleepScore"),
-        (sleep_obj or {}).get("sleepScoreDTO"),
-        (dto or {}).get("sleepScore"),
-        (dto or {}).get("sleepScoreDTO"),
-    ]
-    for cand in direct_candidates:
-        if isinstance(cand, dict):
-            for k in ("overall", "value", "overallScore", "score"):
-                v = cand.get(k)
-                if isinstance(v, (int, float)):
-                    return float(v)
-
-    list_candidates = (sleep_obj or {}).get("sleepScores") or (dto or {}).get("sleepScores")
-    if isinstance(list_candidates, list):
-        for item in list_candidates:
-            if isinstance(item, dict):
-                for k in ("overall", "value", "overallScore", "score"):
-                    v = item.get(k)
-                    if isinstance(v, (int, float)):
-                        return float(v)
-
-    for alt_key in ("scores", "summary"):
-        maybe = (sleep_obj or {}).get(alt_key) or (dto or {}).get(alt_key)
-        if isinstance(maybe, dict):
-            for k in ("overall", "value", "overallScore", "sleepScore"):
-                v = maybe.get(k)
-                if isinstance(v, (int, float)):
-                    return float(v)
-
-    return None
 
 # ---------- Fetchers ----------
 def fetch_activities_by_day(g: Garmin, day_iso: str) -> List[Dict[str, Any]]:
@@ -117,13 +81,6 @@ def fetch_sleep(g: Garmin, day_iso: str) -> Dict[str, Any]:
             val = overall.get("value")
             if isinstance(val, (int, float)):
                 out["score"] = float(val)
-
-        if out["score"] is None:
-            out["score"] = (
-                (sleep.get("sleepScore") or {}).get("value")
-                or (sleep.get("sleepScore") or {}).get("overall")
-                or _extract_sleep_score(sleep, dto)
-            )
     except Exception:
         pass
     return out
@@ -131,31 +88,6 @@ def fetch_sleep(g: Garmin, day_iso: str) -> Dict[str, Any]:
 def fetch_body_battery(g: Garmin, day_iso: str) -> Dict[str, Optional[float]]:
     out = {"bb_start": None, "bb_end": None, "bb_min": None, "bb_max": None, "bb_avg": None}
     try:
-        values = []
-        if hasattr(g, "get_body_battery"):
-            day = pd.to_datetime(day_iso).date()
-            day_next = (day + dt.timedelta(days=1)).isoformat()
-            try:
-                series = g.get_body_battery(day_iso, day_next)
-            except Exception:
-                series = None
-            if isinstance(series, list):
-                for it in series:
-                    cal = it.get("date") or it.get("calendarDate") or it.get("calendar_date")
-                    if cal and str(cal)[:10] != day_iso:
-                        continue
-                    v = it.get("value") or it.get("y")
-                    if isinstance(v, (int, float)):
-                        values.append(float(v))
-
-        if values:
-            out["bb_min"] = min(values)
-            out["bb_max"] = max(values)
-            out["bb_avg"] = round(sum(values) / len(values), 1)
-            out["bb_start"] = values[0]
-            out["bb_end"]   = values[-1]
-            return out
-
         stats = g.get_stats(day_iso) or {}
         out["bb_start"] = stats.get("bodyBatteryAtWakeTime")
         out["bb_end"]   = stats.get("bodyBatteryMostRecentValue")
@@ -173,31 +105,7 @@ def fetch_stress_avg(g: Garmin, day_iso: str) -> Optional[float]:
             return round(float(avg), 1)
     except Exception:
         pass
-
-    try:
-        st_data = None
-        if hasattr(g, "get_stress_data"):
-            st_data = g.get_stress_data(day_iso)
-        if not st_data and hasattr(g, "get_all_day_stress"):
-            st_data = g.get_all_day_stress(day_iso)
-
-        vals = []
-        if isinstance(st_data, list):
-            for x in st_data:
-                v = x.get("stressLevel") or x.get("y") or x.get("value")
-                if isinstance(v, (int, float)):
-                    vals.append(float(v))
-        elif isinstance(st_data, dict):
-            for arr_key in ("stressValues", "stressValuesArray", "allDayStress", "values"):
-                arr = st_data.get(arr_key)
-                if isinstance(arr, list):
-                    for i in arr:
-                        v = (i.get("stressLevel") if isinstance(i, dict) else i)
-                        if isinstance(v, (int, float)):
-                            vals.append(float(v))
-        return round(sum(vals)/len(vals), 1) if vals else None
-    except Exception:
-        return None
+    return None
 
 def fetch_steps_and_calories(g: Garmin, day_iso: str) -> Dict[str, Any]:
     out = {"steps": None, "calories": None}
@@ -265,7 +173,6 @@ def summarize_day(g: Garmin, day_iso: str) -> Tuple[Dict[str, Any], List[Dict[st
         "Body Battery (end)": bb["bb_end"],
         "Body Battery (mín)": bb["bb_min"],
         "Body Battery (máx)": bb["bb_max"],
-        "Body Battery (média)": bb["bb_avg"],
         "Stress (média)": stress,
         "Corrida (km)": round(total_run_km, 2),
         "Pace (min/km)": pace_str(total_run_sec, total_run_km),
@@ -309,39 +216,20 @@ def main():
     g = login_garmin()
 
     daily_rows, activities_rows = [], []
-    raw_summary_rows, raw_sleep_rows, raw_stats_rows = [], [], []
 
     for d in daterange(start, end):
         day_iso = d.isoformat()
-        row, acts, stats = summarize_day(g, day_iso)
+        row, acts, _ = summarize_day(g, day_iso)
         daily_rows.append(row)
         for a in acts:
             activities_rows.append(normalize_activity(a))
 
-        raw_summary_rows.append({"Data": day_iso, "Raw": json.dumps(stats, ensure_ascii=False)})
-        try:
-            sleep_raw = g.get_sleep_data(day_iso) or {}
-        except Exception:
-            sleep_raw = {}
-        try:
-            stats_raw = g.get_stats(day_iso) or {}
-        except Exception:
-            stats_raw = {}
-        raw_sleep_rows.append({"Data": day_iso, "Raw": json.dumps(sleep_raw, ensure_ascii=False)})
-        raw_stats_rows.append({"Data": day_iso, "Raw": json.dumps(stats_raw, ensure_ascii=False)})
-
     # Cria DataFrames
-    new_daily       = pd.DataFrame(daily_rows)
-    new_acts        = pd.DataFrame(activities_rows)
-    new_raw_summary = pd.DataFrame(raw_summary_rows)
-    new_raw_sleep   = pd.DataFrame(raw_sleep_rows)
-    new_raw_stats   = pd.DataFrame(raw_stats_rows)
+    new_daily = pd.DataFrame(daily_rows)
+    new_acts  = pd.DataFrame(activities_rows)
 
-    # Atualiza cada aba no Google Sheets
+    # Atualiza apenas abas principais
     update_sheet(new_daily, "DailyHUD", ["Data"], "Data")
     update_sheet(new_acts, "Activities", ["ID"], "Data")
-    update_sheet(new_raw_summary, "Raw_Summary", ["Data"], "Data")
-    update_sheet(new_raw_sleep, "Raw_Sleep", ["Data"], "Data")
-    update_sheet(new_raw_stats, "Raw_Stats", ["Data"], "Data")
 
     st.success("✅ Dados do Garmin atualizados no Google Sheets!")
