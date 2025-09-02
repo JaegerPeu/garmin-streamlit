@@ -25,7 +25,7 @@ START_DATE = "2023-01-01"
 END_DATE   = "2025-08-31"
 
 # ID da planilha no Google Sheets (já compartilhada com a service account)
-GSHEET_ID = "1rwcDJA1yZ2b...."  # substitua pelo ID da sua planilha
+GSHEET_ID = "1rwcDJA1yZ2hbsJx-HOW0dCduvWqV0z7f9Iio0HI1WwY"  # substitua pelo ID da sua planilha
 
 # Credenciais do Google (do secrets do Streamlit)
 service_account_info = st.secrets["gcp_service_account"]
