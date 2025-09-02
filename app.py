@@ -6,6 +6,7 @@
 # pelo script gsheet.main()).
 # =====================================================
 
+import time
 import streamlit as st
 import pandas as pd
 import gspread
