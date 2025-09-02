@@ -176,7 +176,7 @@ daily_df["Data"] = pd.to_datetime(daily_df["Data"], errors="coerce")
 numeric_cols = [
     "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)",
     "Sono (score)", "Body Battery (start)", "Body Battery (end)",
-    "Body Battery (mín)", "Body Battery (máx)", "Body Battery (média)",
+    "Body Battery (mín)", "Body Battery (máx)", "Body Battery (máx)",
     "Stress (média)", "Passos", "Calorias (total dia)",
     "Corrida (km)", "Pace (min/km)", "Breathwork (min)"
 ]
@@ -446,7 +446,7 @@ insights = {
 
     "Passos — Média":                {"col": "Passos",               "mode": "mean", "fmt": "int"},
     "Calorias (total dia) — Média":  {"col": "Calorias (total dia)", "mode": "mean", "fmt": "num"},
-    "Body Battery (média)":          {"col": "Body Battery (máx)", "mode": "mean", "fmt": "num"},
+    "Body Battery (máx)":          {"col": "Body Battery (máx)", "mode": "mean", "fmt": "num"},
     "Stress médio":                  {"col": "Stress (média)",       "mode": "mean", "fmt": "num"},
 
     # Breathwork: média (considerando >0)
@@ -476,7 +476,7 @@ st.header("📊 Matriz de Correlação")
 
 corr_metrics = st.multiselect(
     "Escolha métricas para calcular correlação:",
-    ["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)", "Passos", "Calorias (total dia)", "Body Battery (média)"],
+    ["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)", "Passos", "Calorias (total dia)", "Body Battery (máx)"],
     default=["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)"]
 )
 
