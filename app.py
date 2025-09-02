@@ -122,6 +122,26 @@ def format_metric(value: Optional[float], fmt: str) -> str:
         return f"{value:,.0f}"
     return f"{value:.2f}"
 
+def mmss_to_minutes(x) -> Optional[float]:
+    """Converte 'mm:ss' (ou 'h:mm:ss') para minutos decimais. Aceita número já decimal."""
+    if pd.isna(x) or x == "":
+        return None
+    try:
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip().replace(",", ".")
+        if ":" in s:
+            parts = s.split(":")
+            if len(parts) == 2:
+                m = float(parts[0]); sec = float(parts[1])
+                return m + sec/60.0
+            if len(parts) == 3:
+                h = float(parts[0]); m = float(parts[1]); sec = float(parts[2])
+                return h*60.0 + m + sec/60.0
+        return float(s)
+    except Exception:
+        return None
+
 # ---------- APP ----------
 st.set_page_config(page_title="📊 Dashboard Garmin", layout="wide")
 
@@ -161,9 +181,12 @@ for c in numeric_cols:
     if c in daily_df.columns:
         daily_df[c] = pd.to_numeric(daily_df[c], errors="coerce")
 
-# Colunas auxiliares pra cálculo
+# Colunas auxiliares pra cálculo e gráficos
+# Pace diário (min/km) em decimal
 if "Pace (min/km)" in daily_df.columns:
-    daily_df["PaceNum"] = pd.to_numeric(daily_df["Pace (min/km)"], errors="coerce")
+    daily_df["PaceNum"] = daily_df["Pace (min/km)"].apply(mmss_to_minutes)
+
+# Para horas de sono (se já vier decimal, mantém; se vier em texto h:mm, pode converter com função similar)
 if "Sono (h)" in daily_df.columns:
     daily_df["SonoHorasNum"] = pd.to_numeric(daily_df["Sono (h)"], errors="coerce")
 
@@ -177,6 +200,12 @@ selected_metrics = st.multiselect(
     default=["Sono (h)", "Sono (score)"]
 )
 
+def series_for_metric(df: pd.DataFrame, colname: str) -> pd.Series:
+    """Se a métrica for Pace (min/km), usar PaceNum (decimal). Senão, usa a própria coluna."""
+    if colname == "Pace (min/km)" and "PaceNum" in df.columns:
+        return df["PaceNum"]
+    return df[colname]
+
 if selected_metrics:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     colors = px.colors.qualitative.Set2
@@ -186,7 +215,7 @@ if selected_metrics:
     y1 = selected_metrics[0]
     fig.add_trace(
         go.Scatter(
-            x=daily_df["Data"], y=daily_df[y1],
+            x=daily_df["Data"], y=series_for_metric(daily_df, y1),
             mode="lines+markers", name=y1,
             line=dict(color=colors[color_idx])
         ),
@@ -200,7 +229,7 @@ if selected_metrics:
         y2 = selected_metrics[1]
         fig.add_trace(
             go.Scatter(
-                x=daily_df["Data"], y=daily_df[y2],
+                x=daily_df["Data"], y=series_for_metric(daily_df, y2),
                 mode="lines+markers", name=y2,
                 line=dict(color=colors[color_idx])
             ),
@@ -213,7 +242,7 @@ if selected_metrics:
     for m in selected_metrics[2:]:
         fig.add_trace(
             go.Scatter(
-                x=daily_df["Data"], y=daily_df[m],
+                x=daily_df["Data"], y=series_for_metric(daily_df, m),
                 mode="lines+markers", name=m,
                 line=dict(color=colors[color_idx % len(colors)]),
                 yaxis="y2" if len(selected_metrics) > 1 else "y"
@@ -234,10 +263,14 @@ st.header("🏃‍♀️ Atividades")
 if not acts_df.empty:
     acts_df["Data"] = pd.to_datetime(acts_df["Data"], errors="coerce")
 
+    # Converter pace da aba de atividades também (para plotar)
+    if "Pace (min/km)" in acts_df.columns:
+        acts_df["PaceNumAct"] = acts_df["Pace (min/km)"].apply(mmss_to_minutes)
+
     activity_types = acts_df["Tipo"].dropna().unique().tolist()
     selected_type = st.selectbox("Escolha o tipo de atividade:", activity_types, index=0)
 
-    df_filtered = acts_df[acts_df["Tipo"] == selected_type]
+    df_filtered = acts_df[acts_df["Tipo"] == selected_type].copy()
 
     act_metrics = ["Distância (km)", "Pace (min/km)", "Duração (min)", "Calorias", "FC Média", "VO2 Máx"]
     selected_act_metrics = st.multiselect(
@@ -245,6 +278,11 @@ if not acts_df.empty:
         act_metrics,
         default=["Distância (km)", "Pace (min/km)"]
     )
+
+    def series_for_act(df: pd.DataFrame, colname: str) -> pd.Series:
+        if colname == "Pace (min/km)" and "PaceNumAct" in df.columns:
+            return df["PaceNumAct"]
+        return pd.to_numeric(df[colname], errors="coerce")
 
     if selected_act_metrics and not df_filtered.empty:
         fig_act = make_subplots(specs=[[{"secondary_y": True}]])
@@ -255,7 +293,7 @@ if not acts_df.empty:
         y1 = selected_act_metrics[0]
         fig_act.add_trace(
             go.Scatter(
-                x=df_filtered["Data"], y=pd.to_numeric(df_filtered[y1], errors="coerce"),
+                x=df_filtered["Data"], y=series_for_act(df_filtered, y1),
                 mode="lines+markers", name=y1,
                 line=dict(color=colors[idx])
             ),
@@ -269,7 +307,7 @@ if not acts_df.empty:
             y2 = selected_act_metrics[1]
             fig_act.add_trace(
                 go.Scatter(
-                    x=df_filtered["Data"], y=pd.to_numeric(df_filtered[y2], errors="coerce"),
+                    x=df_filtered["Data"], y=series_for_act(df_filtered, y2),
                     mode="lines+markers", name=y2,
                     line=dict(color=colors[idx])
                 ),
@@ -282,7 +320,7 @@ if not acts_df.empty:
         for m in selected_act_metrics[2:]:
             fig_act.add_trace(
                 go.Scatter(
-                    x=df_filtered["Data"], y=pd.to_numeric(df_filtered[m], errors="coerce"),
+                    x=df_filtered["Data"], y=series_for_act(df_filtered, m),
                     mode="lines+markers", name=m,
                     line=dict(color=colors[idx % len(colors)]),
                     yaxis="y2" if len(selected_act_metrics) > 1 else "y"
@@ -311,7 +349,7 @@ insights = {
     "Sono Light (h) — Média":        {"col": "Sono Light (h)", "mode": "mean", "fmt": "time"},
     "Qualidade do sono (score)":     {"col": "Sono (score)",   "mode": "mean", "fmt": "num"},
 
-    # Corrida: somar e media só em dias com corrida > 0
+    # Corrida: somar e média só em dias com corrida > 0
     "Distância corrida (km) — Soma": {"col": "Corrida (km)",   "mode": "sum",  "fmt": "num", "only_positive": True, "filter_col": "Corrida (km)"},
     "Distância corrida (km) — Média":{"col": "Corrida (km)",   "mode": "mean", "fmt": "num", "only_positive": True, "filter_col": "Corrida (km)"},
     "Pace médio (min/km)":           {"col": "PaceNum",        "mode": "mean", "fmt": "pace","only_positive": True, "filter_col": "Corrida (km)"},
@@ -349,12 +387,15 @@ st.header("📊 Matriz de Correlação")
 
 corr_metrics = st.multiselect(
     "Escolha métricas para calcular correlação:",
-    metrics,
+    ["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)", "Passos", "Calorias (total dia)", "Body Battery (média)"],
     default=["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)"]
 )
 
 if len(corr_metrics) >= 2:
     df_corr = daily_df.copy()
+    # usar série numérica para Pace
+    if "Pace (min/km)" in corr_metrics and "PaceNum" in df_corr.columns:
+        df_corr["Pace (min/km)"] = df_corr["PaceNum"]
     df_corr = df_corr[corr_metrics].apply(pd.to_numeric, errors="coerce").dropna()
     if not df_corr.empty:
         corr_matrix = df_corr.corr()
@@ -396,7 +437,8 @@ if "Sono (h)" in df_display.columns:
     if "Sono Light (h)" in df_display.columns:
         df_display["Sono Light (h)"] = df_display["Sono Light (h)"].apply(format_hours)
 
-if "Pace (min/km)" in df_display.columns:
-    df_display["Pace (min/km)"] = df_display["Pace (min/km)"].apply(format_pace)
+# exibição do pace em mm:ss na tabela final
+if "PaceNum" in df_display.columns:
+    df_display["Pace (min/km)"] = df_display["PaceNum"].apply(format_pace)
 
 st.dataframe(df_display)
