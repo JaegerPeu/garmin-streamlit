@@ -62,7 +62,6 @@ def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, st
         r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=15)
         if r.status_code == 200:
             return True, "Atualizado!"
-        return False, f"HTTP {r.status_code}: {r.text}"
     except Exception as e:
         return False, str(e)
 
@@ -82,21 +81,65 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
 
 
 def get_today_turtle_objective() -> str:
-    """Lê a aba 'Turtle' e retorna o 'Objetivo' do dia atual (colunas: Data, Objetivo)."""
+    """Lê a aba 'Turtle' e retorna o 'Objetivo' do dia atual (colunas: Data/Objetivo, tolerando variações)."""
     try:
+        import unicodedata
+        import pandas as pd
+
+        def _norm(s: str) -> str:
+            s = str(s)
+            s = "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+            return s.strip().lower()
+
+        # 1) Carrega
         turtle = load_sheet("Turtle")
-        if turtle.empty:
+        if turtle is None or turtle.empty:
             return "-"
-        cols = {c.strip(): c for c in turtle.columns}
-        if "Data" not in cols or "Objetivo" not in cols:
+
+        # 2) Mapeia colunas por nome normalizado (ignora acentos/maiúsculas)
+        name_map = {_norm(c): c for c in turtle.columns}
+
+        date_keys = ["data", "date", "dia"]
+        obj_keys  = ["objetivo", "objective", "goal", "meta"]
+
+        date_col = next((name_map[k] for k in date_keys if k in name_map), None)
+        obj_col  = next((name_map[k] for k in obj_keys if k in name_map), None)
+        if not date_col or not obj_col:
             return "-"
-        turtle["Data"] = pd.to_datetime(turtle[cols["Data"]], errors="coerce").dt.date
-        today = dt.date.today()
-        row = turtle[turtle["Data"] == today]
+
+        # 3) Converte datas (texto, datetime, ou serial Excel)
+        s = turtle[date_col]
+        if pd.api.types.is_numeric_dtype(s):
+            # Excel serial (origem 1899-12-30)
+            dates = pd.to_datetime(s, unit="D", origin="1899-12-30", errors="coerce")
+        else:
+            # Strings/datetime; Brasil costuma ser dia/mês/ano
+            dates = pd.to_datetime(s, errors="coerce", dayfirst=True)
+
+        # Ajuste de timezone para não errar a virada de dia
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("America/Sao_Paulo")
+            today = dt.datetime.now(tz).date()
+            if getattr(dates.dt, "tz", None) is not None:
+                dates = dates.dt.tz_convert(tz)
+        except Exception:
+            # Fallback se ZoneInfo não existir
+            today = dt.date.today()
+
+        turtle["_date"] = dates.dt.date
+
+        # 4) Filtra linha de hoje; se não houver, pega a última <= hoje
+        valid = turtle.dropna(subset=["_date"])
+        row = valid.loc[valid["_date"] == today]
         if row.empty:
-            return "-"
-        objetivo = str(row.iloc[-1][cols["Objetivo"]]).strip()
-        return objetivo if objetivo not in ("", "nan", "NaN", None) else "-"
+            row = valid.loc[valid["_date"] <= today].sort_values("_date")
+            if row.empty:
+                return "-"
+
+        objetivo_val = str(row.iloc[-1][obj_col]).strip()
+        return objetivo_val if objetivo_val and objetivo_val.lower() not in {"nan", "none"} else "-"
+
     except Exception:
         return "-"
 
