@@ -1,7 +1,7 @@
 # app.py
 # =====================================================
 # Dashboard Streamlit para visualização dos dados Garmin
-# + HUD estilo RPG + Human 3.0 (One Thing & Metas)
+# + HUD estilo RPG (envio para Notion via Code Block)
 # Dados são carregados do Google Sheets (já atualizado
 # pelo script gsheet.main()).
 # =====================================================
@@ -15,9 +15,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime as dt
-from typing import Optional, List
+from typing import Optional, List, Tuple
 import requests
-import math
+import json
 import gsheet
 
 # ================= CONFIGURAÇÃO ==================
@@ -27,7 +27,44 @@ service_account_info = st.secrets["gcp_service_account"]
 scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
 client = gspread.authorize(creds)
+
+# Notion (opcional, para enviar HUD)
+NOTION_TOKEN = st.secrets.get("notion_token")       # obrig. para enviar
+NOTION_BLOCK_ID = st.secrets.get("notion_block_id") # opcional
+NOTION_VERSION = "2022-06-28"
 # =================================================
+
+
+# ---------- Helpers Notion ----------
+def _notion_headers():
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": NOTION_VERSION,
+    }
+
+def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, str]:
+    """
+    Atualiza um code block existente no Notion (PATCH /v1/blocks/{block_id})
+    substituindo o conteúdo pelo hud_text.
+    Requer: NOTION_TOKEN e block_id válido de um bloco do tipo 'code'.
+    """
+    try:
+        payload = {
+            "code": {
+                "rich_text": [
+                    {"type": "text", "text": {"content": hud_text}}
+                ],
+                "language": "plain text"
+            }
+        }
+        url = f"https://api.notion.com/v1/blocks/{block_id}"
+        r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=15)
+        if r.status_code in (200, 204):
+            return True, "Atualizado!"
+        return False, f"HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, str(e)
 
 
 # ---------- Utils básicos ----------
@@ -43,72 +80,12 @@ def load_sheet(sheet_name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def ensure_worksheet(sheet_name: str, headers: List[str]) -> gspread.Worksheet:
-    """Garante que uma worksheet exista e tenha cabeçalho; cria se não existir."""
-    sh = client.open_by_key(GSHEET_ID)
-    try:
-        ws = sh.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
-        ws = sh.add_worksheet(title=sheet_name, rows=1000, cols=max(10, len(headers)))
-        ws.append_row(headers, value_input_option="USER_ENTERED")
-        return ws
-
-    # se estiver vazia, escreve cabeçalho
-    existing = ws.get_all_values()
-    if not existing:
-        ws.append_row(headers, value_input_option="USER_ENTERED")
-    else:
-        # se já houver algo, mas o header for diferente, não forço troca para evitar bagunça
-        pass
-    return ws
-
-
-def upsert_humantrack(today: dt.date, payload: dict):
-    """Atualiza (se existir) ou insere uma linha do dia na aba 'HumanTrack'."""
-    headers = ["Data", "OneThing", "Mente", "Estudos", "Trabalho", "Corpo", "Lifestyle", "Notas"]
-    ws = ensure_worksheet("HumanTrack", headers=headers)
-
-    # lê dados existentes
-    records = ws.get_all_records()
-    df = pd.DataFrame(records)
-    if not df.empty and "Data" in df.columns:
-        df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.date
-
-    # se já existe linha do dia -> update
-    if not df.empty and (df["Data"] == today).any():
-        row_idx = df.index[df["Data"] == today][0] + 2  # +2 por causa do header (linha 1)
-        # mapeia cols
-        col_map = {h: i+1 for i, h in enumerate(headers)}
-        # atualiza cada campo
-        ws.update_cell(row_idx, col_map["OneThing"], payload.get("OneThing", ""))
-        ws.update_cell(row_idx, col_map["Mente"], "TRUE" if payload.get("Mente") else "FALSE")
-        ws.update_cell(row_idx, col_map["Estudos"], "TRUE" if payload.get("Estudos") else "FALSE")
-        ws.update_cell(row_idx, col_map["Trabalho"], "TRUE" if payload.get("Trabalho") else "FALSE")
-        ws.update_cell(row_idx, col_map["Corpo"], "TRUE" if payload.get("Corpo") else "FALSE")
-        ws.update_cell(row_idx, col_map["Lifestyle"], "TRUE" if payload.get("Lifestyle") else "FALSE")
-        ws.update_cell(row_idx, col_map["Notas"], payload.get("Notas", ""))
-    else:
-        # append linha nova
-        row = [
-            today.strftime("%Y-%m-%d"),
-            payload.get("OneThing", ""),
-            "TRUE" if payload.get("Mente") else "FALSE",
-            "TRUE" if payload.get("Estudos") else "FALSE",
-            "TRUE" if payload.get("Trabalho") else "FALSE",
-            "TRUE" if payload.get("Corpo") else "FALSE",
-            "TRUE" if payload.get("Lifestyle") else "FALSE",
-            payload.get("Notas", ""),
-        ]
-        ws.append_row(row, value_input_option="USER_ENTERED")
-
-
 def get_today_turtle_objective() -> str:
     """Lê a aba 'Turtle' e retorna o 'Objetivo' do dia atual (colunas: Data, Objetivo)."""
     try:
         turtle = load_sheet("Turtle")
         if turtle.empty:
             return "-"
-        # normaliza cols
         cols = {c.strip(): c for c in turtle.columns}
         if "Data" not in cols or "Objetivo" not in cols:
             return "-"
@@ -192,10 +169,8 @@ def format_pace(value):
     except Exception:
         return "-"
 
-
 def pace_series_to_hover(series: pd.Series):
     return [format_pace(v) if pd.notna(v) and v not in ("", 0) else None for v in series]
-
 
 def format_metric(value: Optional[float], fmt: str) -> str:
     if value is None:
@@ -207,7 +182,6 @@ def format_metric(value: Optional[float], fmt: str) -> str:
     if fmt == "int":
         return f"{value:,.0f}"
     return f"{value:.2f}"
-
 
 def mmss_to_minutes(x) -> Optional[float]:
     if pd.isna(x) or x == "":
@@ -229,10 +203,9 @@ def mmss_to_minutes(x) -> Optional[float]:
 
 
 # ---------- APP ----------
-st.set_page_config(page_title="📊 Dashboard Garmin / Human 3.0", layout="wide")
+st.set_page_config(page_title="📊 Dashboard Garmin / HUD RPG", layout="wide")
 
-st.title("🏃‍♂️ Dashboard de Atividades Garmin + 🎮 HUD Human 3.0")
-st.write("Sincronize seus dados do Garmin com o Google Sheets e veja análises em tempo real. O HUD de RPG mostra seus stats de hoje, e o Human 3.0 registra seu One Thing e metas diárias.")
+st.title("🏃‍♂️ Dashboard de Atividades Garmin + 🎮 HUD RPG")
 
 # Botão para atualizar planilha (coleta Garmin -> Google Sheets)
 if st.button("🔄 Atualizar dados do Garmin"):
@@ -259,7 +232,7 @@ daily_df["Data"] = pd.to_datetime(daily_df["Data"], errors="coerce")
 numeric_cols = [
     "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)",
     "Sono (score)", "Body Battery (start)", "Body Battery (end)",
-    "Body Battery (mín)", "Body Battery (máx)",
+    "Body Battery (mín)", "Body Battery (máx)", "Body Battery (média)",
     "Stress (média)", "Passos", "Calorias (total dia)",
     "Corrida (km)", "Pace (min/km)", "Breathwork (min)"
 ]
@@ -325,7 +298,6 @@ turtle_obj = get_today_turtle_objective()
 # Tipo padrão do HUD (corrida)
 hud_type = "running"
 if not acts_daily.empty:
-    # se existir o tipo running, usa; senão pega o primeiro disponível
     types_avail = acts_daily["Tipo"].dropna().unique().tolist()
     if hud_type not in types_avail and types_avail:
         hud_type = types_avail[0]
@@ -357,6 +329,13 @@ if pd.isna(energia):
     energia = last_day_row.get("Body Battery (end)", None)
 energia_txt = f"{int(energia)}%" if energia is not None and not pd.isna(energia) else "-"
 
+def energy_bar(x):
+    if x is None or pd.isna(x):
+        return "[..........]"
+    x = int(x)
+    filled = max(0, min(10, round(x/10)))
+    return "[" + "#"*filled + "."*(10-filled) + "]"
+
 sono_h = last_day_row.get("Sono (h)", None)
 sono_txt = f"{float(sono_h):.1f}h" if sono_h is not None and not pd.isna(sono_h) else "-"
 
@@ -377,121 +356,64 @@ cal_txt = f"{int(cal_d1):d}" if cal_d1 is not None and not pd.isna(cal_d1) else 
 steps_d1 = last_day_row.get("Passos", None)
 steps_txt = f"{int(steps_d1):d}" if steps_d1 is not None and not pd.isna(steps_d1) else "-"
 
-# Previsão do tempo (opcional)
-weather_line = "—"
-owm_key = st.secrets.get("openweathermap_api_key")
-default_city = st.secrets.get("default_city", "Sao Paulo,BR")
-if owm_key:
-    try:
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={default_city}&appid={owm_key}&units=metric&lang=pt_br"
-        r = requests.get(url, timeout=8)
-        if r.ok:
-            data = r.json()
-            desc = data["weather"][0]["description"].capitalize()
-            temp = round(data["main"]["temp"])
-            weather_line = f"{desc}, {temp}°C"
-    except Exception:
-        weather_line = "—"
+# ----- HUD format (monoespaçado) -----
+WIDTH = 66
+def line(text=""):
+    return f"║ {text.ljust(WIDTH-2)} ║"
 
-# Notícias (opcional)
-news_line = []
-news_key = st.secrets.get("newsapi_key")
-news_topic = st.secrets.get("news_topic", "saúde OR corrida OR sono")
-if news_key:
-    try:
-        url = f"https://newsapi.org/v2/everything?q={news_topic}&language=pt&sortBy=publishedAt&pageSize=3&apiKey={news_key}"
-        r = requests.get(url, timeout=8)
-        if r.ok:
-            js = r.json()
-            for art in js.get("articles", []):
-                title = art.get("title", "").strip()
-                if title:
-                    news_line.append(f"- {title}")
-    except Exception:
-        news_line = []
+def title_box(t):
+    bar = "═"*WIDTH
+    return f"╔{bar}╗\n{line(t)}\n╠{bar}╣"
 
-# Render: HUD ASCII
-hud_card = f"""
-╔══════════════════════════════════════════════════════════════════╗
-║ HUD — {today_str:<54}║
-╠══════════════════════════════════════════════════════════════════╣
-║ Player: Pedro Duarte ║
-║ Energia: {('[##########]' if energia and energia>=90 else '[########..]' if energia and energia>=70 else '[######....]' if energia and energia>=50 else '[###.......]' if energia is not None else '[..........]')} {energia_txt:<5} ║
-║ Sono: {sono_txt:<6} | Qualidade: {score_txt:<3} ║
-║ Clima: {weather_line:<52}║
-╚══════════════════════════════════════════════════════════════════╝
+def end_box():
+    return f"╚{'═'*WIDTH}╝"
 
-╔══════════════════════════════════════════════════════════════════╗
-║ Mente ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Meditação hoje: {breath_today_txt:>3} min | Média 7d: {breath_7d:>3} min ║
-╚══════════════════════════════════════════════════════════════════╝
+hud_lines = []
+# Cabeçalho
+hud_lines.append(title_box(f"HUD — {today_str}"))
+hud_lines.append(line(f"Player: Pedro Duarte"))
+hud_lines.append(line(f"Energia: {energy_bar(energia)} {energia_txt}"))
+hud_lines.append(line(f"Sono: {sono_txt} | Qualidade: {score_txt}"))
+hud_lines.append(end_box())
 
-╔══════════════════════════════════════════════════════════════════╗
-║ Atividade Física (últimos 7 dias) ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Tipo: {hud_type:<57}║
-║ Sessões: {sessions_7d:>3} | Distância: {km_7d:>6.2f} km | Pace médio: {pace_7d:<8} ║
-║ Passos médios: {passos_7d:<44}║
-╚══════════════════════════════════════════════════════════════════╝
+# Mente
+hud_lines.append(title_box("Mente"))
+hud_lines.append(line(f"Meditação hoje: {breath_today_txt:>3} min  |  Média 7d: {breath_7d:>3} min"))
+hud_lines.append(end_box())
 
-╔══════════════════════════════════════════════════════════════════╗
-║ Trabalho / Trade ║
-╠══════════════════════════════════════════════════════════════════╣
-║ Objetivo de hoje: {turtle_obj[:56]:<56}║
-╚══════════════════════════════════════════════════════════════════╝
-"""
-st.markdown(hud_card)
+# Atividade Física
+hud_lines.append(title_box("Atividade Física (últimos 7 dias)"))
+hud_lines.append(line(f"Tipo: {hud_type}"))
+hud_lines.append(line(f"Sessões: {sessions_7d:>2}  |  Distância: {km_7d:>6.2f} km  |  Pace médio: {pace_7d}"))
+hud_lines.append(line(f"Passos médios: {passos_7d}"))
+hud_lines.append(end_box())
 
-if news_line:
-    with st.expander("🗞️ Notícias do dia (títulos)"):
-        st.write("\n".join(news_line))
+# Trabalho / Trade
+turtle_line = turtle_obj if turtle_obj != "-" else "—"
+hud_lines.append(title_box("Trabalho / Trade"))
+hud_lines.append(line(f"Objetivo de hoje: {turtle_line[:WIDTH-22]}"))
+hud_lines.append(end_box())
 
+hud_card = "\n".join(hud_lines)
 
-# =========================================================
-# ==========  🧠 Human 3.0 — One Thing & Metas  ===========
-# =========================================================
-st.header("🧠 Human 3.0 — One Thing & Metas (tracking diário)")
+# Render monoespaçado (mantém simetria)
+st.code(hud_card, language="")
 
-colA, colB = st.columns([2,1])
-with colA:
-    one_thing = st.text_input("🎯 One Thing do dia", value="", placeholder="Qual é a uma coisa que torna seu dia ganho?")
-    notas = st.text_area("📝 Notas rápidas (opcional)", value="", height=80)
-with colB:
-    st.write("Checklist de hoje")
-    m_done = st.checkbox("Mente")
-    e_done = st.checkbox("Estudos")
-    t_done = st.checkbox("Trabalho")
-    c_done = st.checkbox("Corpo")
-    l_done = st.checkbox("Lifestyle")
+# --- Botão para enviar pro Notion ---
+st.subheader("Exportar HUD para o Notion")
+blk_id_default = NOTION_BLOCK_ID or ""
+blk_id_input = st.text_input("Code Block ID do Notion (se vazio, uso o de secrets):", value=blk_id_default)
 
-if st.button("💾 Salvar metas do dia (HumanTrack)"):
-    payload = {
-        "OneThing": one_thing.strip(),
-        "Mente": m_done,
-        "Estudos": e_done,
-        "Trabalho": t_done,
-        "Corpo": c_done,
-        "Lifestyle": l_done,
-        "Notas": notas.strip(),
-    }
-    try:
-        upsert_humantrack(today, payload)
-        st.success("✅ Registro salvo/atualizado em `HumanTrack`!")
-    except Exception as e:
-        st.error("❌ Não consegui salvar no `HumanTrack`.")
-        st.exception(e)
-
-# Mostra últimos 7 registros
-try:
-    ht_df = load_sheet("HumanTrack")
-    if not ht_df.empty:
-        ht_df["Data"] = pd.to_datetime(ht_df["Data"], errors="coerce")
-        ht_df = ht_df.sort_values("Data", ascending=False).head(7)
-        st.subheader("📅 Últimos registros (HumanTrack)")
-        st.dataframe(ht_df)
-except Exception:
-    pass
+if st.button("🚀 Enviar HUD ao Notion"):
+    if not NOTION_TOKEN:
+        st.error("Defina `notion_token` em `secrets.toml` para enviar ao Notion.")
+    else:
+        target_block = blk_id_input.strip() or NOTION_BLOCK_ID
+        if not target_block:
+            st.error("Forneça um Code Block ID do Notion (ou configure `notion_block_id` nos secrets).")
+        else:
+            ok, msg = push_hud_to_notion_codeblock(hud_card, target_block)
+            st.success("HUD enviado ao Notion! ✅") if ok else st.error(f"Falhou ao enviar: {msg}")
 
 
 # =========================================================
@@ -768,4 +690,3 @@ if len(corr_metrics) >= 2:
         st.info("Não há dados suficientes para calcular correlação com as métricas escolhidas.")
 else:
     st.info("Selecione pelo menos 2 métricas para ver correlações.")
-
