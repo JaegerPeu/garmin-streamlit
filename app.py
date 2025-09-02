@@ -416,7 +416,7 @@ if not acts_df.empty:
             st.plotly_chart(fig_act, use_container_width=True)
 
         with st.expander("📋 Tabela de Atividades (agregado por dia)"):
-        st.dataframe(df_filtered)
+            st.dataframe(df_filtered)
 
         with st.expander("Ver tabela de atividades brutas (todas as sessões)"):
             st.dataframe(acts_df)
