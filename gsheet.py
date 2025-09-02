@@ -192,8 +192,8 @@ def summarize_day(g: Garmin, day_iso: str, today: dt.date) -> Dict[str, Any]:
         "Stress (média)": stress,
         "Corrida (km)": round(total_run_km, 2),
         "Pace (min/km)": pace_str(total_run_sec, total_run_km),
-        "Passos": stats["steps"],
-        "Calorias (total dia)": stats["calories"],
+        "Passos d-1": stats["steps"],
+        "Calorias d-1": stats["calories"],
         "Calorias (atividades)": total_cal_acts,
     }
     return row, acts, stats
