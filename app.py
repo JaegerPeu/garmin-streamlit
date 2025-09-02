@@ -429,7 +429,7 @@ hud_lines.append(end_box())
 hud_lines.append(title_box("Atividade Física (últimos 7 dias)"))
 hud_lines.append(line(f"Tipo: {hud_type}"))
 hud_lines.append(line(f"Sessões: {sessions_7d:>2}  |  Distância: {km_7d:>6.2f} km  |  Pace médio: {pace_7d}"))
-hud_lines.append(line(f"Passos médios: {passos_7d}"))
+#colocar algum tipo de objetivo
 hud_lines.append(end_box())
 
 # Trabalho / Trade
@@ -702,7 +702,7 @@ st.header("📊 Matriz de Correlação")
 corr_metrics = st.multiselect(
     "Escolha métricas para calcular correlação:",
     ["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)", "Passos", "Calorias (total dia)", "Body Battery (máx)"],
-    default=["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)"]
+    default=["Sono (h)", "Sono (score)"]
 )
 
 if len(corr_metrics) >= 2:
