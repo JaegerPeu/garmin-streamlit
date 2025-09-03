@@ -2,7 +2,7 @@
 # =====================================================
 # Dashboard Streamlit para visualização dos dados Garmin
 # + HUD estilo RPG (envio para Notion via Code Block)
-# + Sync idempotente da aba DailyHUD para Notion (sem duplicar)
+# + Sync incremental da aba DailyHUD para Notion (cria só novos)
 # Dados são carregados do Google Sheets (já atualizado
 # pelo script gsheet.main()).
 # =====================================================
@@ -47,6 +47,10 @@ def _notion_headers():
         "Notion-Version": NOTION_VERSION,
     }
 
+def normalize_id(i: str) -> str:
+    """Remove hífens e espaços do ID (DB/Page) para evitar 404 falso."""
+    return (i or "").replace("-", "").strip()
+
 def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, str]:
     """
     Atualiza um code block existente no Notion (PATCH /v1/blocks/{block_id})
@@ -61,7 +65,7 @@ def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, st
                 "language": "plain text"
             }
         }
-        url = f"https://api.notion.com/v1/blocks/{block_id}"
+        url = f"https://api.notion.com/v1/blocks/{normalize_id(block_id)}"
         r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=15)
         if r.status_code == 200:
             return True, "Atualizado!"
@@ -70,10 +74,17 @@ def push_hud_to_notion_codeblock(hud_text: str, block_id: str) -> Tuple[bool, st
         return False, str(e)
 
 
-# ---------- Helpers de Database Notion (idempotente) ----------
+# ---------- Helpers de Database Notion (idempotente/incremental) ----------
 def notion_get_database(db_id: str) -> dict:
-    url = f"https://api.notion.com/v1/databases/{db_id}"
+    db = normalize_id(db_id)
+    url = f"https://api.notion.com/v1/databases/{db}"
     r = requests.get(url, headers=_notion_headers(), timeout=30)
+    if r.status_code >= 400:
+        # Log detalhado ajuda a diferenciar "sem acesso" vs "não existe"
+        try:
+            st.write("Notion error:", r.status_code, r.json())
+        except Exception:
+            st.write("Notion error:", r.status_code, r.text[:500])
     r.raise_for_status()
     return r.json()
 
@@ -81,20 +92,20 @@ def notion_update_database_add_props(db_id: str, props_to_add: dict) -> None:
     """Ex.: {"Data": {"date": {}}, "Key": {"rich_text": {}}, "Passos": {"number": {}}}"""
     if not props_to_add:
         return
-    url = f"https://api.notion.com/v1/databases/{db_id}"
+    url = f"https://api.notion.com/v1/databases/{normalize_id(db_id)}"
     payload = {"properties": props_to_add}
     r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=30)
     r.raise_for_status()
 
 def notion_create_page_in_db(db_id: str, properties: dict) -> str:
     url = "https://api.notion.com/v1/pages"
-    payload = {"parent": {"database_id": db_id}, "properties": properties}
+    payload = {"parent": {"database_id": normalize_id(db_id)}, "properties": properties}
     r = requests.post(url, headers=_notion_headers(), data=json.dumps(payload), timeout=30)
     r.raise_for_status()
     return r.json()["id"]
 
 def notion_update_page_props(page_id: str, properties: dict) -> None:
-    url = f"https://api.notion.com/v1/pages/{page_id}"
+    url = f"https://api.notion.com/v1/pages/{normalize_id(page_id)}"
     payload = {"properties": properties}
     r = requests.patch(url, headers=_notion_headers(), data=json.dumps(payload), timeout=30)
     r.raise_for_status()
@@ -113,7 +124,7 @@ def get_or_create_date_prop_name(db_id: str) -> str:
     return "Data"
 
 def ensure_key_prop(db_id: str, key_prop: str = "Key") -> None:
-    """Garante a existência da propriedade 'Key' (rich_text) para upsert."""
+    """Garante a existência da propriedade 'Key' (rich_text) para upsert/incremental."""
     meta = notion_get_database(db_id)
     props = meta.get("properties", {})
     if key_prop not in props or props[key_prop].get("type") != "rich_text":
@@ -122,8 +133,9 @@ def ensure_key_prop(db_id: str, key_prop: str = "Key") -> None:
 def notion_query_all_keys(db_id: str, key_prop: str = "Key") -> dict:
     """
     Retorna dict {key(str): page_id(str)} para todas as páginas do DB, baseado na prop 'Key' (rich_text).
+    Faz paginação com page_size=100, sem GET por página (eficiente).
     """
-    url = f"https://api.notion.com/v1/databases/{db_id}/query"
+    url = f"https://api.notion.com/v1/databases/{normalize_id(db_id)}/query"
     existing = {}
     payload = {"page_size": 100}
     next_cursor = None
@@ -223,11 +235,20 @@ def ensure_db_schema_for_dailyhud(db_id: str, numeric_cols: List[str], text_cols
     if to_add:
         notion_update_database_add_props(db_id, to_add)
 
-def sync_entire_dailyhud_to_notion(daily_df: pd.DataFrame, db_id: str) -> tuple[int, int]:
+def build_key_for_row(row: pd.Series) -> str:
+    day_str = pd.to_datetime(row["Data"]).date().isoformat()
+    return f"DailyHUD::{day_str}"
+
+def sync_entire_dailyhud_to_notion(
+    daily_df: pd.DataFrame,
+    db_id: str,
+    only_new: bool = True  # True = cria apenas chaves que não existem (modo eficiente)
+) -> tuple[int, int]:
     """
-    Upsert de TODA a aba para o Notion (sem duplicar):
-    - chave única: Key = "DailyHUD::<YYYY-MM-DD>"
-    - data: usa a propriedade date do DB (descoberta automaticamente)
+    Sincroniza a aba DailyHUD para o Notion de forma eficiente:
+    - `only_new=True` (padrão): cria apenas as chaves que ainda não existem no DB.
+    - Não realiza PATCH/UPDATE em páginas já existentes.
+    Retorna: (created, updated) — updated será sempre 0 neste modo.
     """
     if not db_id:
         raise ValueError("Defina `notion.dailyhud_db_id` em secrets.toml.")
@@ -235,16 +256,14 @@ def sync_entire_dailyhud_to_notion(daily_df: pd.DataFrame, db_id: str) -> tuple[
     df = daily_df.copy()
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce").dt.normalize()
     df = df.dropna(subset=["Data"]).sort_values("Data")
-
-    # se houver linhas repetidas por Data na planilha, fica só a última
+    # se houver duplicidade de data na planilha, manter só a última
     df = df.groupby(df["Data"].dt.date, as_index=False).last()
     df["Data"] = pd.to_datetime(df["Data"])
 
-    # PaceNum
+    # PaceNum auxiliar
     if "PaceNum" not in df.columns and "Pace (min/km)" in df.columns:
         df["PaceNum"] = df["Pace (min/km)"].apply(mmss_to_minutes)
 
-    # Colunas para envio
     candidate_numeric = [
         "Sono (h)", "Sono Deep (h)", "Sono REM (h)", "Sono Light (h)", "Sono (score)",
         "Body Battery (start)", "Body Battery (end)", "Body Battery (mín)",
@@ -253,36 +272,35 @@ def sync_entire_dailyhud_to_notion(daily_df: pd.DataFrame, db_id: str) -> tuple[
         "Corrida (km)", "PaceNum", "Breathwork (min)"
     ]
     numeric_cols = [c for c in candidate_numeric if c in df.columns]
-    text_cols: List[str] = []  # adicione aqui se tiver colunas textuais
+    text_cols: List[str] = []  # adicione se tiver colunas textuais
 
-    # Garante schema e props
+    # Schema no DB
     date_prop_name = get_or_create_date_prop_name(db_id)
     ensure_key_prop(db_id, "Key")
     ensure_db_schema_for_dailyhud(db_id, numeric_cols, text_cols)
 
-    # Mapa de páginas existentes por Key
+    # Mapa existente (Key -> page_id)
     existing_by_key = notion_query_all_keys(db_id, "Key")
+    existing_keys = set(existing_by_key.keys())
 
     created, updated = 0, 0
-    for _, row in df.iterrows():
-        day_str = row["Data"].date().isoformat()
-        key_value = f"DailyHUD::{day_str}"
 
+    # Seleciona apenas as linhas que ainda não existem no Notion
+    to_create = []
+    for _, row in df.iterrows():
+        key_value = build_key_for_row(row)
+        if key_value not in existing_keys:
+            to_create.append((key_value, row))
+
+    # Cria somente os novos
+    for key_value, row in to_create:
         props = build_properties_from_row(
             row, numeric_cols, text_cols,
             date_prop_name=date_prop_name, key_value=key_value
         )
-
-        page_id = existing_by_key.get(key_value)
-        if page_id:
-            notion_update_page_props(page_id, props)
-            updated += 1
-        else:
-            page_id = notion_create_page_in_db(db_id, props)
-            existing_by_key[key_value] = page_id
-            created += 1
-
-        time.sleep(0.35)  # respeitar rate limit do Notion (~3 req/s)
+        notion_create_page_in_db(db_id, props)
+        created += 1
+        time.sleep(0.35)  # respeitar rate limit (~3 req/s)
 
     return created, updated
 
@@ -559,12 +577,14 @@ if not acts_df.empty:
     )
     acts_daily["Pace (min/km)"] = acts_daily["PaceNumDaily"].apply(format_pace)
 
-# ========== AUTO-SYNC DailyHUD -> Notion (sem perguntar, sem escolher datas) ==========
+# ========== AUTO-SYNC DailyHUD -> Notion (incremental: só cria novos) ==========
 if NOTION_TOKEN and NOTION_DAILYHUD_DB_ID:
     if "auto_synced_dailyhud" not in st.session_state:
-        with st.spinner("Sincronizando DailyHUD inteiro com o Notion..."):
+        with st.spinner("Sincronizando DailyHUD (apenas novos) com o Notion..."):
             try:
-                created, updated = sync_entire_dailyhud_to_notion(daily_df, NOTION_DAILYHUD_DB_ID)
+                created, updated = sync_entire_dailyhud_to_notion(
+                    daily_df, NOTION_DAILYHUD_DB_ID, only_new=True
+                )
                 st.session_state["auto_synced_dailyhud"] = True
                 st.success(f"✅ DailyHUD sincronizado! Criadas: {created} • Atualizadas: {updated}")
             except Exception as e:
@@ -683,7 +703,8 @@ hud_lines.append(line(f"Sessões: {sessions_7d:>2}  |  Distância: {km_7d:>6.2f}
 hud_lines.append(end_box())
 
 # Trabalho / Trade
-turtle_line = turtle_obj if turtle_obj != "-" else "—"
+turtle_line = get_today_turtle_objective()
+turtle_line = turtle_line if turtle_line != "-" else "—"
 hud_lines.append(title_box("Trabalho / Trade"))
 hud_lines.append(line(f"Objetivo de hoje: {turtle_line[:WIDTH-22]}"))
 hud_lines.append(end_box())
