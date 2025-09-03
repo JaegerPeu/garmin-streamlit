@@ -593,6 +593,54 @@ if NOTION_TOKEN and NOTION_DAILYHUD_DB_ID:
 else:
     st.info("Configure `notion.dailyhud_db_id` em `secrets.toml` para habilitar o envio automático ao Notion.")
 # ======================================================================================
+# ======================== SINCRONIZAÇÃO MANUAL COM NOTION =========================
+st.subheader("🔁 Sincronização manual com Notion (DailyHUD)")
+
+dbid_default = NOTION_DAILYHUD_DB_ID or ""
+dbid_input = st.text_input(
+    "Database ID do Notion (DailyHUD) — pode colar aqui para sobrepor o do secrets:",
+    value=dbid_default,
+    help="Cole o ID do database (sem hífens). Se deixar vazio, uso o configurado em secrets."
+)
+
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("Repopular Notion (criar apenas as novas)"):
+        target_db_id = (dbid_input or NOTION_DAILYHUD_DB_ID).strip()
+        if not NOTION_TOKEN:
+            st.error("Defina `notion.token` em `secrets.toml`.")
+        elif not target_db_id:
+            st.error("Informe o Database ID do Notion.")
+        else:
+            # garante que a sincronização automática não bloqueie essa execução manual
+            st.session_state.pop("auto_synced_dailyhud", None)
+            with st.spinner("Repopulando o DailyHUD no Notion (somente chaves que faltam)..."):
+                try:
+                    created, updated = sync_entire_dailyhud_to_notion(
+                        daily_df, target_db_id, only_new=True
+                    )
+                    st.success(f"✅ Repopulado! Criadas: {created} • Atualizadas: {updated}")
+                except Exception as e:
+                    st.error("❌ Falha ao repopular o Notion.")
+                    st.exception(e)
+
+with col2:
+    if st.button("Testar conexão com o DB"):
+        target_db_id = (dbid_input or NOTION_DAILYHUD_DB_ID).strip()
+        if not NOTION_TOKEN:
+            st.error("Defina `notion.token` em `secrets.toml`.")
+        elif not target_db_id:
+            st.error("Informe o Database ID do Notion.")
+        else:
+            try:
+                meta = notion_get_database(target_db_id)
+                title_txt = "".join([t.get("plain_text", "") for t in meta.get("title", [])]) or "—"
+                st.success(f"Conectado! Título do DB: {title_txt}")
+                st.write("Propriedades:", list(meta.get("properties", {}).keys())[:20])
+            except Exception as e:
+                st.error("Não consegui acessar esse DB. Verifique o ID e as permissões da integração.")
+                st.exception(e)
+# ==================================================================================
 
 
 # =========================================================
