@@ -217,9 +217,9 @@ if "Duration" in activities_df.columns:
 
 # Aggregate per day
 agg_df = activities_df.groupby("Data").agg({
-    "Duration_min": "sum",
-    "Distance": "sum",
-    "Calories": "sum"
+    "Duração (min)": "sum",
+    "Distância (km)": "sum",
+    "Calorias": "sum"
 }).reset_index()
 
 # Merge with DailyHUD
