@@ -216,7 +216,7 @@ if "Duration" in activities_df.columns:
     activities_df["Duration_min"] = activities_df["Duration"].apply(mmss_to_minutes)
 
 # Aggregate per day
-agg_df = activities_df.groupby("Date").agg({
+agg_df = activities_df.groupby("Data").agg({
     "Duration_min": "sum",
     "Distance": "sum",
     "Calories": "sum"
@@ -225,7 +225,7 @@ agg_df = activities_df.groupby("Date").agg({
 # Merge with DailyHUD
 if "Data" in dailyhud_df.columns:
     dailyhud_df["Data"] = pd.to_datetime(dailyhud_df["Data"]).dt.date
-merged_df = pd.merge(dailyhud_df, agg_df, left_on="Data", right_on="Date", how="outer").sort_values("Data")
+merged_df = pd.merge(dailyhud_df, agg_df, left_on="Data", right_on="Data", how="outer").sort_values("Data")
 
 # ---------------- HUD RPG ----------------
 def render_hud_rpg(df: pd.DataFrame, date: Optional[dt.date] = None) -> str:
