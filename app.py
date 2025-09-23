@@ -269,7 +269,7 @@ def sync_entire_dailyhud_to_notion(
         "Body Battery (start)", "Body Battery (end)", "Body Battery (mín)",
         "Body Battery (máx)", "Body Battery (média)",
         "Stress (média)", "Passos", "Calorias (total dia)",
-        "Corrida (km)", "PaceNum", "Breathwork (min)"
+        "Corrida (km)", "PaceNum", "Duração (min)"
     ]
     numeric_cols = [c for c in candidate_numeric if c in df.columns]
     text_cols: List[str] = []  # adicione se tiver colunas textuais
@@ -531,7 +531,7 @@ numeric_cols = [
     "Sono (score)", "Body Battery (start)", "Body Battery (end)",
     "Body Battery (mín)", "Body Battery (máx)", "Body Battery (média)",
     "Stress (média)", "Passos", "Calorias (total dia)",
-    "Corrida (km)", "Pace (min/km)", "Breathwork (min)"
+    "Corrida (km)", "Pace (min/km)", "Duração (min)"
 ]
 for c in numeric_cols:
     if c in daily_df.columns:
@@ -704,13 +704,13 @@ sono_txt = f"{float(sono_h):.1f}h" if sono_h is not None and not pd.isna(sono_h)
 sono_score = last_day_row.get("Sono (score)", None)
 score_txt = f"{int(sono_score)}" if sono_score is not None and not pd.isna(sono_score) else "-"
 
-breath_today = last_day_row.get("Breathwork (min)", None)
+breath_today = last_day_row.get("Duração (min)", None)
 breath_today_txt = f"{int(breath_today)}" if breath_today is not None and not pd.isna(breath_today) else "0"
 
 breath_7d = 0
-if "Breathwork (min)" in daily_df.columns:
+if "Duração (min)" in daily_df.columns:
     d7 = daily_df[last_n_days_mask(daily_df, 7)]
-    breath_7d = int(round(d7["Breathwork (min)"].fillna(0).mean())) if not d7.empty else 0
+    breath_7d = int(round(d7["Duração (min)"].fillna(0).mean())) if not d7.empty else 0
 
 cal_d1 = last_day_row.get("Calorias (total dia)", None)
 cal_txt = f"{int(cal_d1):d}" if cal_d1 is not None and not pd.isna(cal_d1) else "-"
@@ -994,7 +994,7 @@ insights = {
     "Calorias (total dia) — Média":  {"col": "Calorias (total dia)", "mode": "mean", "fmt": "num"},
     "Body Battery (máx)":            {"col": "Body Battery (máx)",   "mode": "mean", "fmt": "num"},
     "Stress médio":                  {"col": "Stress (média)",       "mode": "mean", "fmt": "num"},
-    "Breathwork (min) — Média":      {"col": "Breathwork (min)",     "mode": "mean", "fmt": "int", "only_positive": True},
+    "Breathwork (min) — Média":      {"col": "Duração (min)",     "mode": "mean", "fmt": "int", "only_positive": True},
 }
 
 insight_rows = []
@@ -1020,7 +1020,7 @@ st.header("📊 Matriz de Correlação")
 
 corr_metrics = st.multiselect(
     "Escolha métricas para calcular correlação:",
-    ["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Breathwork (min)", "Passos", "Calorias (total dia)", "Body Battery (máx)"],
+    ["Sono (h)", "Sono (score)", "Stress (média)", "Corrida (km)", "Pace (min/km)", "Duração (min)", "Passos", "Calorias (total dia)", "Body Battery (máx)"],
     default=["Sono (h)", "Sono (score)"]
 )
 
