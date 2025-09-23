@@ -213,7 +213,7 @@ activities_df = load_gsheet("Activities")
 
 # ---------------- Process Activities ----------------
 if "Duration" in activities_df.columns:
-    activities_df["Duration_min"] = activities_df["Duration"].apply(mmss_to_minutes)
+    activities_df["Duração (min)"] = activities_df["Duração (min)"].apply(mmss_to_minutes)
 
 # Aggregate per day
 agg_df = activities_df.groupby("Data").agg({
